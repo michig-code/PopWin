@@ -99,7 +99,7 @@ class UpdateDialog(CenteredPanel):
             self.install.setEnabled(True)
             return
         # Das Setup beendet PopWin selbst, ersetzt die Dateien und startet es danach wieder.
-        subprocess.Popen([path], close_fds=True)
+        subprocess.Popen([path, "--auto-update"], close_fds=True)  # ohne den Schalter wartete es still auf einen Klick
         self.dismiss()
 
     def keyPressEvent(self, event) -> None:

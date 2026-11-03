@@ -18,14 +18,14 @@ import winreg
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QThread, Signal
+from PySide6.QtCore import QPoint, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-VERSION = "3.8.1"  # bei jeder neuen Ausgabe erhöhen, daran erkennt das Setup ein Update
+VERSION = "3.8.2"  # bei jeder neuen Ausgabe erhöhen, daran erkennt das Setup ein Update
 APP_NAME = "PopWin"
 EXE_NAME = "PopWin.exe"
 UNINSTALLER = "Deinstallieren.exe"
@@ -36,6 +36,7 @@ START_LINK = "Microsoft/Windows/Start Menu/Programs/PopWin.lnk"
 # Der Notausgang, den früher die .bat im Projektordner bot: Endnutzer bekommen PopWin nur über Setup oder Portable.
 RESTORE_LINK = "Microsoft/Windows/Start Menu/Programs/Windows-Taskleiste wiederherstellen.lnk"
 RESTORE_ARGUMENTS = "--app watchdog --restore"
+AUTO_UPDATE = "--auto-update"  # von PopWins Update-Dialog: ohne Rückfrage aktualisieren und PopWin neu starten
 BUNDLE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 ASIDE_PREFIX = ".alt-"
 DELETE_TRIES = 6
@@ -392,6 +393,7 @@ class Wizard(QWidget):
         box.addLayout(head)
         self.pages = QStackedWidget()
         box.addWidget(self.pages, 1)
+        self.automatic = False
         self.buttons = QHBoxLayout()
         self.back = QPushButton("Zurück")
         self.back.clicked.connect(lambda: self.show_page(self.pages.currentIndex() - 1))
@@ -521,8 +523,14 @@ class Wizard(QWidget):
         self.worker = InstallThread(Path(self.folder.text()), options)
         self.worker.progress.connect(self.bar.setValue)
         self.worker.failed.connect(self._failed)
-        self.worker.done.connect(lambda: self.show_page(self.done_page))
+        self.worker.done.connect(self._finish if self.automatic else lambda: self.show_page(self.done_page))
         self.worker.start()
+
+    def auto_update(self) -> None:
+        """Aus PopWin gestartet: gleich aktualisieren und danach PopWin wieder öffnen, ohne dass jemand klicken muss.
+        Das Fenster ging sonst hinter den Leisten unter und wartete dort still auf „Aktualisieren“."""
+        self.automatic = True
+        self._update()
 
     def _failed(self, message: str, needs_admin: bool) -> None:
         self.progress_note.setText(f"Das hat nicht geklappt: {message}")
@@ -585,6 +593,18 @@ class Wizard(QWidget):
             event.ignore()
 
 
+def started_by_popwin() -> bool:
+    """Ältere PopWins starten das Setup noch ohne --auto-update. Kommt es aus PopWin.exe, ist es trotzdem ein Update."""
+    try:
+        import psutil
+        parent = psutil.Process().parent()
+        while parent is not None and parent.name().lower() == "popwin setup.exe":  # der Starter der Ein-Datei-EXE
+            parent = parent.parent()
+        return parent is not None and parent.name().lower() == EXE_NAME.lower()
+    except Exception:
+        return False
+
+
 def main() -> int:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PopWin.Setup")
     app = QApplication(sys.argv)
@@ -598,7 +618,14 @@ def main() -> int:
         return app.exec()
     elevated = Path(sys.argv[sys.argv.index("--elevated") + 1]) if "--elevated" in sys.argv else None
     wizard = Wizard("--uninstall" in sys.argv, elevated)
+    automatic = (AUTO_UPDATE in sys.argv or started_by_popwin()) and not elevated and getattr(wizard, "updating", False)
+    if automatic:  # vor PopWins Leisten, damit man sieht, dass etwas passiert
+        wizard.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
     wizard.show()
+    if automatic:
+        wizard.raise_()
+        wizard.activateWindow()
+        QTimer.singleShot(400, wizard.auto_update)
     return app.exec()
 
 

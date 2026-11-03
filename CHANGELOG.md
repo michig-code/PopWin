@@ -1,5 +1,9 @@
 # Änderungen
 
+## 3.8.2
+
+- **Updates laufen durch:** Nach „Jetzt aktualisieren“ installiert das Setup sofort, bleibt dabei sichtbar im Vordergrund und startet PopWin danach von selbst neu. Vorher wartete es versteckt hinter den Leisten auf einen Klick.
+
 ## 3.8.1
 
 - **Update-Suche sagt, woran es liegt:** Statt immer „Keine Verbindung“ unterscheidet PopWin jetzt zwischen fehlendem Internet, einer Update-Quelle, die es nicht gibt, zu vielen Anfragen und Störungen bei GitHub. Gibt es noch keine neue Version, heißt es „Kein Update gefunden“. Für Updates braucht niemand ein GitHub-Konto.
