@@ -1311,8 +1311,8 @@ class SettingsWindow(NativeWindow):
         form.addRow(page.text(
             "Die normale Taskleiste ist ausgeblendet, solange PopWin läuft und eine eigene Taskbar aktiv ist. "
             "Beim Beenden kommt sie automatisch zurück, auch nach einem Absturz. Notfall: "
-            "Strg + Alt + Umschalt + K beendet PopWin sofort, und die Datei "
-            "<b>Taskleiste wiederherstellen.bat</b> holt sie von Hand zurück."))
+            "Strg + Alt + Umschalt + K beendet PopWin sofort, und der Startmenü-Eintrag "
+            "<b>Windows-Taskleiste wiederherstellen</b> holt sie von Hand zurück."))
         self.hide_taskbar = QCheckBox("Windows-Taskleiste ausblenden")
         self.hide_taskbar.toggled.connect(self.ctx.set_native_taskbar_hidden)
         form.addRow(self.hide_taskbar)

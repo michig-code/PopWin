@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
 )
 
-from core import win_api
+from core import i18n, win_api
 from core.ai_actions import settings_catalog
 from core.gemini_client import GeminiWorker, PlanWorker
 from core.replacements import launch
@@ -238,7 +238,7 @@ class SearchLauncher(ThemedWindow):
                     for a in self.ctx.apps.search(query, config["max_results"])]
         if config["show_commands"]:
             lowered = query.lower()
-            results += [Result(f"{desc}  ({cmd})", lambda c=cmd: run_command(c))
+            results += [Result(f"{i18n.translate(desc)}  ({cmd})", lambda c=cmd: run_command(c))  # zusammengesetzt fände i18n sie nicht
                         for cmd, desc in RUN_COMMANDS.items()
                         if cmd.startswith(lowered) or lowered in desc.lower()][:3]
             if is_run_target(query):

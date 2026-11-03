@@ -177,7 +177,8 @@ explorer_app.STORE = Path(tempfile.mkdtemp()) / "explorer.json"  # Tests fassen 
 for _name, _stub in (("appbar_register", lambda *a: None), ("appbar_remove", lambda *a: None),
                      ("appbar_set_pos", lambda hwnd, edge, monitor, thickness, current=None: tuple(monitor)),
                      ("force_foreground", lambda *a: None), ("set_zorder", lambda *a: None), ("move_desktop_icon", lambda *a: None),
-                     ("desktop_command", lambda *a: None), ("send_keys", lambda *a: None), ("own_by_desktop", lambda *a: True)):
+                     ("desktop_command", lambda *a: None), ("send_keys", lambda *a: None), ("own_by_desktop", lambda *a: True),
+                     ("shell_open", lambda *a: True)):  # kein Test startet je ein echtes Programm, eine Datei oder Webseite
     setattr(win_api, _name, _stub)
 
 
@@ -404,24 +405,29 @@ class MonitorProfiles(unittest.TestCase):
         self.assertEqual(seen, ["profile", "monitors"])
 
 
-class Activation(unittest.TestCase):
-    # Eigener Kanal: Der echte würde ein laufendes PopWin ansprechen und dessen Einstellungen öffnen.
-    CHANNEL = f"PopWin.Test.{uuid.uuid4().hex}"
+class QuietStart(unittest.TestCase):
+    """Ein Start von PopWin öffnet nie von selbst ein Fenster, nur beim allerersten Mal die Setup-Seite."""
 
-    def test_no_running_instance(self):
-        self.assertFalse(popwin_main.notify_running_instance(self.CHANNEL))
+    def test_first_start_shows_setup_once(self):
+        ctx = ResetContext()
+        opened = []
+        ctx.settings.open_page = lambda setup=False: opened.append(setup)
+        for name in ("_apply_native_taskbar", "rebuild_bars", "_restart_hooks", "import_windows_pins"):
+            setattr(ctx, name, lambda *a: None)
+        for part in (ctx.status, ctx.media, ctx.apps, ctx.notifications, ctx.widgets, ctx.extensions, ctx.nova):
+            part.start = lambda *a: None
+        ctx.desktop_groups.sync = lambda: None
+        with unittest.mock.patch.object(win_api, "ensure_start_menu_entry"), unittest.mock.patch.object(win_api, "move_autostart_link"), \
+                unittest.mock.patch("main.QTimer.singleShot"):
+            ctx.start()
+            self.assertEqual(opened, [True])
+            ctx.start()  # jeder weitere Start: nichts
+        self.assertEqual(opened, [True])
 
-    def test_second_start_reaches_the_first(self):
-        calls = []
-        server = popwin_main.listen_for_activation(lambda: calls.append(1), self.CHANNEL)
-        self.assertTrue(popwin_main.notify_running_instance(self.CHANNEL))
-        for _ in range(50):
-            app.processEvents()
-            if calls:
-                break
-            time.sleep(0.01)
-        server.close()
-        self.assertEqual(calls, [1])
+    def test_second_start_and_restart_open_nothing(self):
+        source = (ROOT_PATH / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn("notify_running_instance", source)
+        self.assertNotIn("open_explorer()", source.split("def main", 1)[1])
 
 
 class WindowsPins(unittest.TestCase):
@@ -693,6 +699,7 @@ class Pins(unittest.TestCase):
             open_explorer = staticmethod(opened.append)
 
         ctx = Recorder()
+        ctx.config.set("replacements.explorer", True)  # Beta, ab Werk aus
         shell_open, target = win_api.shell_open, win_api.shortcut_target
         started = []
         win_api.shell_open = lambda path: started.append(path) or True
@@ -1035,6 +1042,7 @@ class Pins(unittest.TestCase):
 
     def test_popwin_explorer_takes_the_real_explorer_slot(self):
         ctx = ResetContext()
+        ctx.config.set("replacements.explorer", True)
         key, group = taskbar_slot(ctx, "explorer")
         self.assertEqual((key, group["target"]), ("explorer.exe", "explorer.exe"))
         self.assertNotIn("icon", group)  # im Platz des echten Explorers bleibt sein echtes Symbol
@@ -1045,22 +1053,14 @@ class Pins(unittest.TestCase):
         self.assertEqual((key, group["target"]), ("popwin:settings", ""))
         self.assertTrue(Path(group["icon"]).exists())
 
-    def test_restart_also_renews_the_explorer(self):
+    def test_restart_leaves_open_windows_alone(self):
         ctx = ResetContext()
         ctx.disable_ui = lambda: None
-        closed = []
-        original = win_api.close_window
-        win_api.close_window = closed.append
-        ctx.windows = lambda: [win_api.WindowInfo(7, "PopWin Explorer", "py.exe", 1, popwin_app="explorer"),
-                               win_api.WindowInfo(8, "Paint", "paint.exe", 2)]
-        try:
+        with unittest.mock.patch.object(win_api, "close_window") as closed:
+            ctx.windows = lambda: [win_api.WindowInfo(7, "PopWin Explorer", "py.exe", 1, popwin_app="explorer")]
             ctx.restart_ui()
-            self.assertEqual((closed, ctx.reopen_explorer), ([7], True))
-            ctx.windows = lambda: []
-            ctx.restart_ui()
-            self.assertFalse(ctx.reopen_explorer)
-        finally:
-            win_api.close_window = original
+        closed.assert_not_called()
+        self.assertTrue(ctx.restart_requested)
 
     def test_workspace_chips_need_two_desktops(self):
         class Chips:
@@ -3700,8 +3700,14 @@ class ExplorerList(unittest.TestCase):
     def test_text_opens_in_the_editor(self):
         ctx = ResetContext()
         pane = Pane(ctx, str(self.root))
-        with unittest.mock.patch("subprocess.Popen") as started:
-            pane.open_file(str(self.root / "a" / "text.txt"))
+        path = str(self.root / "a" / "text.txt")
+        with unittest.mock.patch("subprocess.Popen") as started, \
+                unittest.mock.patch.object(win_api, "shell_open") as windows_app:  # nie die echte Windows-App starten
+            pane.open_file(path)  # ab Werk ist der PopWin-Editor aus (Beta)
+            started.assert_not_called()
+            windows_app.assert_called_once_with(path)
+            ctx.config.set("replacements.editor", True)
+            pane.open_file(path)
         self.assertIn("editor", " ".join(started.call_args[0][0]))
 
 
@@ -4002,6 +4008,11 @@ class PopWinApps(unittest.TestCase):
         ctx = ResetContext()
         opened = []
         ctx.open_app = lambda name, *arguments: opened.append(name)
+        with unittest.mock.patch.object(win_api, "shell_open", return_value=True) as windows_app:
+            launch(ctx, "notepad.exe")  # ab Werk startet noch die Windows-App
+        self.assertEqual((opened, windows_app.call_count), ([], 1))
+        for app_name in ("editor", "terminal", "studio"):
+            ctx.config.set(f"replacements.{app_name}", True)
         launch(ctx, "notepad.exe")
         launch(ctx, "cmd.exe")
         launch(ctx, "powershell_ise.exe")
@@ -5416,6 +5427,7 @@ class ClaudeKnopf(unittest.TestCase):
         dock.hide()
 
 
+@unittest.skipUnless((ROOT_PATH / "PopWin starten.bat").exists(), "das Startskript gehört nur zum Dev-Build")
 class StartScript(unittest.TestCase):
     def test_bat_repairs_a_foreign_environment(self):
         script = (ROOT_PATH / "PopWin starten.bat").read_text(encoding="utf-8")

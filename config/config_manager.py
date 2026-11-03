@@ -43,7 +43,8 @@ DEFAULTS: dict[str, Any] = {
         "taskbar": {"mode": "all", "screens": []},
     },
     "extensions": {"enabled": {}, "discord": {"monitors": [], "layout": "windows", "size": 1080, "fps": 15}},
-    "replacements": {"explorer": True, "editor": True, "terminal": True, "studio": True},
+    # Beta: Die PopWin-Apps ersetzen ihre Windows-Gegenstücke erst, wenn man sie einzeln einschaltet.
+    "replacements": {"explorer": False, "editor": False, "terminal": False, "studio": False},
     "notifications": {"side": "right", "width": 380, "group": True, "show_count": True, "hidden": []},
     "taskbar": {
         "windows_pins_imported": False,

@@ -13,7 +13,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-REOPEN_EXPLORER = "--reopen-explorer"
 if __name__ == "__main__":
     # Installiert ist alles eine PopWin.exe: Die Apps dürfen PopWin selbst nicht mitstarten.
     from core.paths import app_from_arguments
@@ -31,7 +30,6 @@ if __name__ == "__main__":
 import comtypes  # noqa: E402,F401
 from PySide6.QtCore import QObject, QTimer  # noqa: E402
 from PySide6.QtGui import QCursor, QFont, QGuiApplication  # noqa: E402
-from PySide6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from config.config_manager import ConfigManager  # noqa: E402
@@ -65,7 +63,6 @@ from ui.widgets import WidgetManager  # noqa: E402
 
 log = logging.getLogger("popwin")
 PID_FILE = LOG_DIR / "popwin.pid"
-_ACTIVATE_NAME = "PopWin.Activate"
 _MUTEX_NAME = "PopWin.SingleInstance"
 SESSION_RETRY_MS = 30000
 UPDATE_DELAY_MS = 20000  # erst wenn alles steht; die Suche fragt GitHub
@@ -93,7 +90,6 @@ class PopWinApp(QObject):
         self._closed = False
         self._exiting = False
         self.restart_requested = False
-        self.reopen_explorer = False
         self._started = False
         self._taskbar_hidden = False
         self._windows_cache: list[win_api.WindowInfo] = []
@@ -393,12 +389,9 @@ class PopWinApp(QObject):
     def restart_ui(self) -> None:
         """Beendet PopWin wie der Kill-Switch; main() startet es danach neu.
 
-        Der Explorer ist ein eigener Prozess und bliebe sonst auf dem alten Stand.
+        Offene Fenster wie der PopWin Explorer bleiben, wie sie sind: Ein Start von PopWin öffnet nie von selbst ein Fenster,
+        nur beim allerersten Mal die Einstellungen auf der Setup-Seite.
         """
-        explorers = [w for w in self.windows() if w.popwin_app == "explorer"]
-        for window in explorers:
-            win_api.close_window(window.hwnd)
-        self.reopen_explorer = bool(explorers)
         self.restart_requested = True
         self.disable_ui()
 
@@ -439,32 +432,6 @@ def _setup_logging() -> None:
     sys.excepthook = lambda *exc: log.critical("Unbehandelter Fehler", exc_info=exc)
 
 
-def notify_running_instance(name: str = _ACTIVATE_NAME) -> bool:
-    """Sagt einem laufenden PopWin, dass es sich zeigen soll; wahr, wenn es erreichbar war."""
-    socket = QLocalSocket()
-    socket.connectToServer(name)
-    if not socket.waitForConnected(500):
-        return False
-    socket.disconnectFromServer()
-    return True
-
-
-def listen_for_activation(on_activate, name: str = _ACTIVATE_NAME) -> QLocalServer:
-    QLocalServer.removeServer(name)  # Rest eines abgestürzten Laufs
-    server = QLocalServer()
-    server.listen(name)
-
-    def accept() -> None:
-        connection = server.nextPendingConnection()
-        if connection:
-            connection.disconnectFromServer()
-            connection.deleteLater()
-        on_activate()
-
-    server.newConnection.connect(accept)
-    return server
-
-
 def create_application(argv: list[str]) -> QApplication:
     app = QApplication(argv)
     app.setApplicationName("PopWin")
@@ -488,9 +455,7 @@ def main() -> int:
         os._exit(0)  # ohne Aufräumen: Die Fenster wurden nie gezeigt, Windows meldet dabei einen Exitcode ungleich 0
     mutex = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
     if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-        log.info("PopWin läuft bereits")
-        if win_api.AUTOSTART_FLAG not in sys.argv:  # die zweite Autostart-Spur soll nichts aufpoppen lassen
-            notify_running_instance()  # Wer PopWin in der Suche anklickt, soll etwas sehen
+        log.info("PopWin läuft bereits")  # nichts aufpoppen lassen, egal ob Autostart, .bat oder Startmenü
         return 0
 
     if win_api.AUTOSTART_FLAG in sys.argv:
@@ -502,15 +467,11 @@ def main() -> int:
     app.commitDataRequest.connect(lambda _manager: popwin.session_ending())
     atexit.register(popwin.shutdown)
     popwin.start()
-    if REOPEN_EXPLORER in sys.argv:
-        popwin.open_explorer()
-    activation =listen_for_activation(popwin.open_settings)  # noqa: F841 - muss am Leben bleiben
     code = app.exec()
     PID_FILE.unlink(missing_ok=True)
     ctypes.windll.kernel32.CloseHandle(mutex)
     if popwin.restart_requested:  # erst jetzt: solange der Mutex lebt, gäbe das neue PopWin sofort auf
-        arguments = app_command("main", *([REOPEN_EXPLORER] if popwin.reopen_explorer else []))
-        subprocess.Popen(arguments, cwd=ROOT, creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.Popen(app_command("main"), cwd=ROOT, creationflags=subprocess.CREATE_NO_WINDOW)
     return code
 
 

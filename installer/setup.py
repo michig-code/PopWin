@@ -33,6 +33,9 @@ UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\PopWin"
 RUN_LINK = "Microsoft/Windows/Start Menu/Programs/Startup/PopWin.lnk"  # früherer Weg, wird beim Update abgelöst
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 START_LINK = "Microsoft/Windows/Start Menu/Programs/PopWin.lnk"
+# Der Notausgang, den früher die .bat im Projektordner bot: Endnutzer bekommen PopWin nur über Setup oder Portable.
+RESTORE_LINK = "Microsoft/Windows/Start Menu/Programs/Windows-Taskleiste wiederherstellen.lnk"
+RESTORE_ARGUMENTS = "--app watchdog --restore"
 BUNDLE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 ASIDE_PREFIX = ".alt-"
 DELETE_TRIES = 6
@@ -67,13 +70,14 @@ def app_data(relative: str) -> Path:
     return Path(os.environ["APPDATA"]) / relative
 
 
-def write_shortcut(link: Path, target: Path) -> None:
+def write_shortcut(link: Path, target: Path, arguments: str = "", description: str = "PopWin Desktop-Oberfläche") -> None:
     from win32com.client import Dispatch
     shortcut = Dispatch("WScript.Shell").CreateShortcut(str(link))
     shortcut.TargetPath = str(target)
+    shortcut.Arguments = arguments
     shortcut.WorkingDirectory = str(target.parent)
     shortcut.IconLocation = str(target)
-    shortcut.Description = "PopWin Desktop-Oberfläche"
+    shortcut.Description = description
     shortcut.Save()
 
 
@@ -326,6 +330,7 @@ class InstallThread(QThread):
         target = self.folder / EXE_NAME
         register(self.folder, size)
         write_shortcut(app_data(START_LINK), target)
+        write_shortcut(app_data(RESTORE_LINK), target, RESTORE_ARGUMENTS, "Holt die Windows-Taskleiste zurück")
         if self.options["desktop"]:
             write_shortcut(desktop_link(), target)
         set_autostart(target if self.options["autostart"] else None)
@@ -348,7 +353,7 @@ class UninstallThread(QThread):
         if restore:
             restore_taskbar(self.folder)
         set_autostart(None)
-        for link in (app_data(START_LINK), desktop_link()):
+        for link in (app_data(START_LINK), app_data(RESTORE_LINK), desktop_link()):
             link.unlink(missing_ok=True)
         try:
             winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)

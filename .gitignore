@@ -3,6 +3,7 @@ config/*
 !config/config_manager.py
 nova/
 devtools/
+/*.bat
 *.log
 *.log.*
 popwin.pid
