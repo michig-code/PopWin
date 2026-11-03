@@ -28,6 +28,7 @@ from ui.stat_pages import CachePanel, NetworkStats, PerformanceStats
 from ui.audio_outputs import AudioOutputs
 from ui.base import G, ScrollFields, glyph_icon, resettable
 from core.dev import dev_menu_wanted, is_dev, open_dev_menu
+from core.updater import NO_RELEASE
 from core.version import REPO, VERSION
 from ui.clock_place import PLACES, PlacePicker
 from ui.dock_tools import STACK_ORDERS, TOOL_ITEMS, TOOL_MODES
@@ -554,7 +555,8 @@ class SettingsWindow(NativeWindow):
         updates.check(manual=True)
 
     def _show_update_state(self, result: str) -> None:
-        self.update_state.setText({"neu": "Eine neue Version ist da.", "aktuell": "PopWin ist aktuell."}.get(result, result))
+        self.update_state.setText({"neu": "Eine neue Version ist da.", "aktuell": "PopWin ist aktuell.",
+                                   NO_RELEASE: "Kein Update gefunden."}.get(result, result))
 
     def _open_dev_menu(self) -> None:
         open_dev_menu(self.ctx)

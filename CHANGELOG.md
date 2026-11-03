@@ -1,5 +1,9 @@
 # Änderungen
 
+## 3.8.1
+
+- **Update-Suche sagt, woran es liegt:** Statt immer „Keine Verbindung“ unterscheidet PopWin jetzt zwischen fehlendem Internet, einer Update-Quelle, die es nicht gibt, zu vielen Anfragen und Störungen bei GitHub. Gibt es noch keine neue Version, heißt es „Kein Update gefunden“. Für Updates braucht niemand ein GitHub-Konto.
+
 ## 3.8
 
 - **Uhr an genau einem Platz:** Neuer Tab „Uhr“ in den Einstellungen. Ein Klick ins Bild legt fest, wo Uhrzeit und Datum stehen: Topbar rechts oder Mitte, Taskbar links oder rechts oder schwebend über der Taskbar-Mitte.
@@ -16,4 +20,6 @@
 - **Symbolleiste über der Taskbar** ist jetzt eine Beta für alle. Schwebt auch die Uhr über der Taskbar-Mitte, wählst du, wer unten sitzt, auch direkt im Bild des Uhr-Tabs.
 - **Topbar:** Das Akku-Symbol zeigt den echten Füllstand, der Lautsprecher je nach Lautstärke weniger oder mehr Wellen.
 - **Widgets** bleiben bei Win + D stehen. Das Notiz-Widget lässt sich wieder sauber größer und kleiner ziehen.
-- **PopWin starten.bat** richtet sich auf jedem PC selbst ein, auch mit einer mitkopierten Python-Umgebung, und ergänzt neue Pakete von allein.
+- **PopWin-Apps sind jetzt Beta und ab Werk aus:** Explorer, Editor, Terminal und PowerShell Studio ersetzen die Windows-Apps erst, wenn du sie unter Einstellungen → Beta einschaltest.
+- **Ruhiger Start:** PopWin öffnet beim Start keine Fenster mehr, auch nicht beim zweiten Start oder nach einem Neustart. Nur beim allerersten Mal erscheinen die Einstellungen auf der Setup-Seite.
+- **Notausgang im Startmenü:** Das Setup legt den Eintrag „Windows-Taskleiste wiederherstellen“ an. Er holt die Windows-Taskleiste zurück, falls sie einmal fehlt.

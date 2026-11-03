@@ -86,8 +86,8 @@ class UpdateDialog(CenteredPanel):
     def _download(self) -> None:
         try:
             path = updater.download(self.release["setup"], self.relay.progress.emit)
-        except Exception as exc:
-            self.relay.done.emit("", str(exc))
+        except Exception as exc:  # Netzfehler kommen als UpdateError mit lesbarer Meldung, die eigenen Prüfungen als OSError
+            self.relay.done.emit("", exc.message if isinstance(exc, updater.UpdateError) else str(exc))
             return
         self.relay.done.emit(str(path), "")
 

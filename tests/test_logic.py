@@ -2,6 +2,7 @@
 import asyncio
 import ctypes
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -4398,6 +4399,77 @@ class Updates(unittest.TestCase):
             self.assertEqual(found, [])
             checker._run(manual=True)
         self.assertEqual(len(found), 1)
+
+    @staticmethod
+    def http_error(code: int, headers: dict | None = None):
+        import email.message
+        import urllib.error
+        message = email.message.Message()
+        for key, value in (headers or {}).items():
+            message[key] = value
+        return urllib.error.HTTPError("https://api.github.com/x", code, "Fehler", message, None)
+
+    def answers(self, *replies):
+        """urlopen, das nacheinander antwortet: ein dict als JSON, eine Exception wird geworfen."""
+        seen = []
+
+        def fake(request, timeout=None):
+            seen.append(request)
+            reply = replies[len(seen) - 1]
+            if isinstance(reply, Exception):
+                raise reply
+            answer = unittest.mock.MagicMock()
+            answer.__enter__.return_value = io.BytesIO(json.dumps(reply).encode())
+            return answer
+        return unittest.mock.patch("urllib.request.urlopen", side_effect=fake), seen
+
+    def test_no_token_is_ever_sent(self):
+        patcher, seen = self.answers(self.RELEASE)
+        with patcher:
+            updater.fetch_latest("ich/popwin")
+        self.assertNotIn("Authorization", seen[0].headers)
+        self.assertEqual(seen[0].full_url, "https://api.github.com/repos/ich/popwin/releases/latest")
+
+    def test_repository_without_release_is_not_an_error(self):
+        patcher, seen = self.answers(self.http_error(404), {"full_name": "ich/popwin"})
+        with patcher:
+            self.assertEqual(updater.fetch_latest("ich/popwin")["version"], "")
+        self.assertEqual(seen[1].full_url, "https://api.github.com/repos/ich/popwin")
+
+    def test_errors_are_told_apart(self):
+        import urllib.error
+        cases = [((self.http_error(404), self.http_error(404)), "not_found"),
+                 ((self.http_error(403, {"X-RateLimit-Remaining": "0"}),), "rate_limit"),
+                 ((self.http_error(401),), "auth"),
+                 ((self.http_error(403),), "auth"),
+                 ((self.http_error(503),), "server"),
+                 ((urllib.error.URLError("getaddrinfo failed"),), "offline"),
+                 ((TimeoutError("timed out"),), "offline")]
+        for replies, kind in cases:
+            patcher, _seen = self.answers(*replies)
+            with patcher, self.assertRaises(updater.UpdateError) as caught:
+                updater.fetch_latest("ich/popwin")
+            self.assertEqual(caught.exception.kind, kind, replies)
+            self.assertEqual(caught.exception.message, updater.MESSAGES[kind])
+
+    def test_settings_show_the_real_reason(self):
+        ctx = ResetContext()
+        checker = updater.UpdateChecker(ctx.config)
+        results = []
+        checker.finished.connect(results.append)
+        with unittest.mock.patch.object(updater, "fetch_latest", side_effect=updater.UpdateError("not_found")):
+            checker._run(manual=True)
+        with unittest.mock.patch.object(updater, "fetch_latest", return_value={"version": ""}):
+            checker._run(manual=True)
+        self.assertEqual(results, [updater.MESSAGES["not_found"], updater.NO_RELEASE])
+        ctx.settings._show_update_state(updater.NO_RELEASE)
+        self.assertEqual(ctx.settings.update_state.text(), "Kein Update gefunden.")
+
+    def test_download_errors_are_readable(self):
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=self.http_error(404)):
+            with self.assertRaises(updater.UpdateError) as caught:
+                updater.download({"url": "https://x/s.exe", "size": 3, "sha256": ""})
+        self.assertEqual(caught.exception.kind, "not_found")
 
     def test_no_source_no_request(self):
         ctx = ResetContext()
