@@ -1,0 +1,18 @@
+# Persönliches: kommt nie auf GitHub
+config/*
+!config/config_manager.py
+nova/
+devtools/
+*.log
+*.log.*
+popwin.pid
+.env
+*.key
+
+# Erzeugtes
+.venv/
+__pycache__/
+build/
+dist/
+release/
+*.tmp

@@ -1,0 +1,29 @@
+/* Novas klassisches Aussehen. Die Platzhalter füllt ThemeManager.nova_classic aus NOVA_CLASSICS. */
+* { font-family: "Segoe UI Variable Text", "Segoe UI"; font-size: 14px; color: @fg; outline: none; }
+
+#Panel { background: transparent; border: none; }
+#NovaHead { background: @field; border: 1px solid @line; border-radius: 18px; }
+#PanelTitle { font-size: 14px; font-weight: 300; }
+#Muted { color: @muted; font-size: 12px; }
+#MediaTitle { font-weight: 600; font-size: 13px; }
+
+QPushButton { background: transparent; border: 1px solid @line; border-radius: 15px; padding: 5px 12px; }
+QPushButton:hover { background: @accent_soft; border-color: @accent_edge; }
+QPushButton:pressed { background: @accent_edge; }
+QPushButton#Primary { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 @accent_soft, stop:1 @b3_soft); border-color: @accent_edge; font-weight: 600; }
+#IconButton { border: none; border-radius: 15px; font-size: 16px; min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px; padding: 0; }
+#IconButton[kind="send"] { border: 1px solid @accent_edge; border-radius: 19px; color: @accent; min-width: 38px; max-width: 38px; min-height: 38px; max-height: 38px; }
+#IconButton[kind="mic"] { background: qradialgradient(cx:0.5, cy:0.35, radius:0.7, fx:0.5, fy:0.35, stop:0 @accent_soft, stop:1 @b3_soft); border: 1px solid @accent_edge; border-radius: 19px; min-width: 38px; max-width: 38px; min-height: 38px; max-height: 38px; }
+
+#NovaCard { background: @field; border: 1px solid @line; border-radius: 12px; }
+#NovaCard[who="user"] { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 @accent_soft, stop:1 @b3_soft); border: 1px solid @accent_edge; }
+#NovaReply { background: @field; border: 1px solid @line; border-radius: 16px; }
+
+QLineEdit, QPlainTextEdit { background: @solid; border: 1px solid @line; border-radius: 15px; padding: 5px 12px; selection-background-color: @accent; }
+QLineEdit:focus, QPlainTextEdit:focus { border-color: @accent; }
+QToolTip { background: @solid; border: 1px solid @line; color: @fg; }
+
+QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }
+QScrollBar::handle:vertical { background: @line; border-radius: 4px; min-height: 40px; }
+QScrollBar::handle:vertical:hover { background: @accent; }
+QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page { background: none; height: 0; }

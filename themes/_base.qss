@@ -1,0 +1,50 @@
+/* Gilt für alle Themes: Symbole kommen aus der Windows-Symbolschrift. */
+#IconButton, #StartButton, #Trash, #TaskGlyph, #Glyph, #MenuGlyph {
+    font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+}
+#Bar[popFit="true"] { border: 1px solid rgba(128, 128, 128, 0.35); border-radius: 8px; }
+#Bar[dropping="true"] { border: 1px solid #48B9C7; }
+#WidgetCard { text-align: left; padding: 8px 10px; background: rgba(128, 128, 128, 0.14); border-radius: 8px; }
+#BigValue { font-size: 28px; font-weight: 600; }
+#WindowRow { border-radius: 6px; }
+#WindowRow:hover, #WindowRow[focused="true"] { background: rgba(128, 128, 128, 0.22); }
+#PreviewCard { border-radius: 8px; }
+#PreviewCard:hover { background: rgba(128, 128, 128, 0.22); }
+#Popover { background: #2B2B2B; border: 1px solid rgba(128, 128, 128, 0.35); border-radius: 8px; }
+[popMode="light"] #Popover { background: #FAFAFA; }
+#PopoverItem { background: transparent; text-align: left; padding: 7px 26px 7px 8px; border-radius: 6px; }
+#PopoverItem:hover { background: rgba(128, 128, 128, 0.24); }
+QScrollBar:horizontal { background: rgba(128, 128, 128, 0.12); height: 18px; }
+QScrollBar::handle:horizontal { background: rgba(165, 165, 165, 0.8); border-radius: 7px; margin: 2px; min-width: 56px; }
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: rgba(205, 205, 205, 0.95); }
+QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed { background: #4FB9C6; }
+#SearchField { background: rgba(128, 128, 128, 0.18); text-align: left; padding: 4px 10px; border-radius: 6px; }
+#SearchField:hover { background: rgba(128, 128, 128, 0.3); }
+#SearchField[searchStyle="pill"] { border-radius: 13px; }
+#CommandButton { background: transparent; border: none; border-radius: 5px; padding: 4px 9px; }
+#CommandButton:hover { background: rgba(128, 128, 128, 0.2); }
+#CommandButton:disabled { color: rgba(128, 128, 128, 0.6); }
+#ExplorerPlaces { background: transparent; border: none; outline: none; }
+#ExplorerPlaces::item { padding: 4px 8px; border-radius: 6px; }
+#ExplorerPlaces::item:hover { background: rgba(128, 128, 128, 0.18); }
+#ExplorerPlaces::item:selected { background: rgba(128, 128, 128, 0.28); }
+#MonitorTile { background: rgba(128, 128, 128, 0.16); border: 2px solid rgba(128, 128, 128, 0.35); border-radius: 6px; padding: 0; }
+#MonitorTile:hover { background: rgba(128, 128, 128, 0.28); }
+#MonitorTile:checked { background: rgba(79, 185, 198, 0.22); border-color: #4FB9C6; }
+#MonitorNumber { font-size: 26px; font-weight: 600; background: transparent; }
+#TitleBar { background: transparent; }
+#WinButton { font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets"; font-size: 10px; border-radius: 0; padding: 0; min-width: 46px; min-height: 32px; }
+#WinClose { font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets"; font-size: 10px; border-radius: 0; padding: 0; min-width: 46px; min-height: 32px; }
+#WinClose:hover { background: #E81123; color: #FFFFFF; }
+#SettingsNav { background: transparent; border: none; outline: none; }
+#SettingsNav::item { padding: 9px 12px; border-radius: 7px; margin: 1px 0; }
+#SettingsNav::item:hover { background: rgba(128, 128, 128, 0.16); }
+#SettingsNav::item:selected { background: rgba(128, 128, 128, 0.30); }
+#TitleSearch { padding: 4px 10px; border-radius: 7px; }
+#WinButton[hot="true"] { background: rgba(128, 128, 128, 0.25); }
+#SearchHits { border: 1px solid rgba(128, 128, 128, 0.4); border-radius: 8px; padding: 4px; }
+#SearchHits::item { padding: 6px 8px; border-radius: 6px; }
+/* Umbenennen in Listen: Der große Innenabstand normaler Textfelder passt nicht in eine Zeile. */
+QAbstractItemView QLineEdit { padding: 0 3px; margin: 0; border: 1px solid #48B9C7; border-radius: 3px; min-height: 0; }
+QTreeView::item { padding: 2px 0; min-height: 22px; }
+QToolTip { background: #1F1F1F; color: #F2F2F2; border: 1px solid #444444; padding: 3px 6px; }
