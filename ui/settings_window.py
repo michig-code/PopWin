@@ -628,9 +628,19 @@ class SettingsWindow(NativeWindow):
 
         self._dock_tools_group(layout, selected)
         if is_dev():
-            dev_check, _combo, _spin = group("Dev · Claude-Knopf")
-            dev_check("dev_claude_button", "Claude-Knopf ganz links, Claude nicht als Task")
+
+
+            # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+            dev_form = self._option_group(layout, selected, "Dev · Claude-Knopf & Sidebar")
+            dev_check, dev_combo, _spin = self._monitor_controls(dev_form, selected.key)
+            dev_check("dev_claude_button", "Claude-Knopf neben dem Home-Knopf")
+            from ui import sidebar
+            dev_combo("taskbar_position", "Taskbar-Position (inkl. Sidebar)", sidebar.taskbar_positions())
+            # --- [Antigravity Ende: Sidebar Support] ---
+
         check, combo, spin = group("Elemente")
+        if is_dev():  # [Antigravity: Claude-Knopf umschaltbar wie andere Elemente]
+            check("dev_claude_button", "Claude-Knopf anzeigen")
         check("show_start", "Home-Knopf anzeigen")
         combo("start_style", "Symbol des Home-Knopfs", {
             "home": "Haus", "windows": "Windows-Logo", "logo": "PopWin-Logo"})
@@ -754,7 +764,10 @@ class SettingsWindow(NativeWindow):
         positions = {"top": "Oben", "bottom": "Unten"}
         combo("theme", "UI-Stil", {"": "Wie globaler Stil", **PRESETS})
         combo("topbar_position", "Topbar-Position", positions)
-        combo("taskbar_position", "Taskbar-Position", positions)
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        from ui import sidebar
+        combo("taskbar_position", "Taskbar-Position", sidebar.taskbar_positions())
+        # --- [Antigravity Ende: Sidebar Support] ---
         if key is not None:
             copy = QPushButton("Auf alle Monitore übertragen", objectName="Secondary")
             copy.clicked.connect(lambda: self._copy_to_all(key))

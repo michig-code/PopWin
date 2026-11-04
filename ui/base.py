@@ -149,6 +149,16 @@ def icon_for_target(target: str) -> QIcon:
     """Icon einer .exe, einer Verknüpfung oder eines Befehls; leer, wenn es keine Datei gibt."""
     if target in _icon_cache:
         return _icon_cache[target]
+    # --- [Antigravity Start] Icons für interne PopWin-Pins (z. B. popwin:dev) ---
+    if target.startswith("popwin:"):
+        from core.replacements import app_icon
+        app_name = target.removeprefix("popwin:")
+        icon_file = app_icon(app_name)
+        if os.path.exists(icon_file):
+            icon = QIcon(icon_file)
+            _icon_cache[target] = icon
+            return icon
+    # --- [Antigravity Ende] ---
     packaged = win_api.packaged_app_target(target)
     if packaged or target.lower().startswith("shell:appsfolder"):
         icon = _take_icon(win_api.shell_item_hicon(packaged or target))
@@ -250,6 +260,12 @@ def edge_reveals(hot: bool, since: float | None, now: float, level: int) -> tupl
 def in_hot_zone(x: int, y: int, area: tuple[int, int, int, int], edge: str, depth: int) -> bool:
     """Liegt der Mauszeiger am Rand, an dem die Leiste aufklappt?"""
     left, top, right, bottom = area
+    # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+    if edge in ("left", "right"):
+        if not top <= y < bottom:
+            return False
+        return left <= x < left + depth if edge == "left" else right - depth <= x < right
+    # --- [Antigravity Ende: Sidebar Support] ---
     if not left <= x < right:
         return False
     return top <= y < top + depth if edge == "top" else bottom - depth <= y < bottom
@@ -341,10 +357,15 @@ class BarWindow(ThemedWindow):
         self.slide_offset = offset
         if self._placed:
             x, y, width, height = self._placed
+            # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+            if self.edge in ("left", "right"):
+                win_api.place_window(int(self.winId()), x + offset, y, width, height)
+                return
+            # --- [Antigravity Ende: Sidebar Support] ---
             win_api.place_window(int(self.winId()), x, y + offset, width, height)
 
     def _fade_in(self) -> None:
-        self.animator.enter(1.0, slide=-12 if self.edge == "top" else 12)
+        self.animator.enter(1.0, slide=-12 if self.edge in ("top", "left") else 12)  # [Antigravity: Sidebar Support]
 
     # --- Auto-Hide ---------------------------------------------------------------
     def auto_hides(self) -> bool:
@@ -364,7 +385,8 @@ class BarWindow(ThemedWindow):
         else:
             self._edge_timer.stop()
             self._revealed = True
-            if not self.isVisible() or first:
+            # [Antigravity: Auch mitten im Ausblenden (closing) wieder einblenden]
+            if not self.isVisible() or self.animator.closing or first:
                 self.show()
                 self._fade_in()
 
@@ -469,6 +491,13 @@ class BarWindow(ThemedWindow):
         rect = win_api.appbar_set_pos(hwnd, self.edge, monitor, thickness, self._rect)
         self._rect = rect
         left, top, right, bottom = rect if thickness else monitor
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if self.edge in ("left", "right"):
+            x = left + margin if self.edge == "left" else right - size - margin
+            self._area = (top + margin, bottom - margin, x, size)
+            self.apply_geometry()
+            return
+        # --- [Antigravity Ende: Sidebar Support] ---
         y = top + margin if self.edge == "top" else bottom - size - margin
         self._area = (left + margin, right - margin, y, size)
         self.apply_geometry()
@@ -483,6 +512,12 @@ class BarWindow(ThemedWindow):
         return int(self.meta()["margin"])
 
     def apply_geometry(self) -> None:
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if self.edge in ("left", "right"):
+            top, bottom, x, size = self._area
+            self._place(x, top, size, bottom - top)
+            return
+        # --- [Antigravity Ende: Sidebar Support] ---
         left, right, y, size = self._area
         self._place(left, y, right - left, size)
 
@@ -501,6 +536,12 @@ class BarWindow(ThemedWindow):
         x, y, width, height = self._placed
         if win_api.window_rect(int(self.winId())) != (x, y, x + width, y + height):
             win_api.place_window(int(self.winId()), x, y, width, height)
+        # --- [Antigravity Start] Qt-Fenstergröße mit nativer Platzierung synchron halten ---
+        ratio = self.bar_screen.devicePixelRatio()
+        wanted = QSize(round(width / ratio), round(height / ratio))
+        if self.size() != wanted:
+            self.resize(wanted)
+        # --- [Antigravity Ende] ---
 
     def set_theme_name(self, name: str) -> None:
         self.theme_name = name
@@ -637,6 +678,25 @@ class PopupPanel(ThemedWindow):
         screen = anchor.screen().availableGeometry()
         # Beim Ein- und Ausblenden steht die Leiste kurz daneben; das Menü richtet sich nach ihrem festen Platz.
         offset = round(getattr(anchor.window(), "slide_offset", 0) / anchor.devicePixelRatio())
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        bar_edge = getattr(anchor.window(), "edge", "bottom")
+        if bar_edge in ("left", "right"):
+            top_left = anchor.mapToGlobal(QPoint(0, 0)) - QPoint(offset, 0)
+            bar_x = anchor.window().mapToGlobal(QPoint(0, 0)).x() - offset
+            bar_w = anchor.window().width()
+            gap = bar_gap or 8
+            x = (bar_x + bar_w + gap) if bar_edge == "left" else (bar_x - self.width() - gap)
+            x = min(max(x, screen.left() + 4), screen.right() - self.width() - 4)
+            y = screen.center().y() - self.height() // 2 if self.CENTERED else top_left.y()
+            y = min(max(y, screen.top() + 4), screen.bottom() - self.height() - 4)
+            self.move(x, y)
+            self.show()
+            win_api.force_foreground(int(self.winId()))
+            self.activateWindow()
+            self.setFocus()
+            self.animator.enter(1.0, slide=-8 if bar_edge == "left" else 8)
+            return
+        # --- [Antigravity Ende: Sidebar Support] ---
         top_left = anchor.mapToGlobal(QPoint(0, 0)) - QPoint(0, offset)
         x = screen.center().x() - self.width() // 2 if self.CENTERED else top_left.x()
         x = min(max(x, screen.left() + 4), screen.right() - self.width() - 4)

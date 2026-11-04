@@ -1,6 +1,8 @@
 """PopWin - Entry-Point, App-Initialisierung und Safe-Exit."""
 from __future__ import annotations
 
+from core.dev import is_dev  # [Antigravity]
+
 import atexit
 import ctypes
 import logging
@@ -60,6 +62,7 @@ from ui.task_preview import TaskPreview  # noqa: E402
 from ui.taskbar import Dock, merge_pins, pin_for_path  # noqa: E402
 from ui.topbar import TopBar  # noqa: E402
 from ui.widgets import WidgetManager  # noqa: E402
+from ui import sidebar  # noqa: E402  # [Antigravity]
 
 log = logging.getLogger("popwin")
 PID_FILE = LOG_DIR / "popwin.pid"
@@ -169,7 +172,7 @@ class PopWinApp(QObject):
             state = self.config.monitor(key)
             for kind, cls in (("topbar", TopBar), ("taskbar", Dock)):
                 if self.config.bar_on(kind, key, primary):
-                    edge = state[f"{kind}_position"]
+                    edge = sidebar.effective_edge(state[f"{kind}_position"]) if kind == "taskbar" else state[f"{kind}_position"]  # [Antigravity: Sidebar Support]
                     wanted[(key, cls, edge)] = (screen, cls, state["theme"])
         return wanted
 
@@ -221,7 +224,13 @@ class PopWinApp(QObject):
 
     def _own_windows(self) -> list[win_api.WindowInfo]:
         """list_windows lässt PopWin aus, die Einstellungen sollen aber wie eine App in der Taskbar stehen."""
-        windows = (("settings", self.settings), ("widgets", self.widgets.gallery))
+        windows = [("settings", self.settings), ("widgets", self.widgets.gallery)]
+        # --- [Antigravity Start] Dev-Menü auf der Taskbar anzeigen ---
+        if is_dev():
+            dev_menu = getattr(sys.modules.get("devtools.menu"), "_menu", None)
+            if dev_menu is not None:
+                windows.append(("dev", dev_menu))
+        # --- [Antigravity Ende] ---
         return [win_api.WindowInfo(int(window.winId()), window.windowTitle(), sys.executable, os.getpid(), popwin_app=app)
                 for app, window in windows if window is not None and window.isVisible()]
 

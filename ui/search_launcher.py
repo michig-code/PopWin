@@ -103,6 +103,7 @@ class Result:
     action: Callable[[], None]
     target: str = ""
     glyph: str = ""
+    app_name: str = ""  # [Antigravity: App-Name für Nutzungstracking]
 
 
 class SearchLauncher(ThemedWindow):
@@ -234,7 +235,7 @@ class SearchLauncher(ThemedWindow):
             results.append(Result(label, lambda: self.ctx.set_dark_mode(mode)))
         if wants_studio(query):
             results.append(Result("PowerShell Studio", lambda: self.ctx.open_app("studio"), STUDIO_ICON))
-        results += [Result(a.name, lambda t=a.target: launch(self.ctx, t), a.target)
+        results += [Result(a.name, lambda t=a.target, n=a.name: self._run_app(n, t), a.target, app_name=a.name)  # [Antigravity]
                     for a in self.ctx.apps.search(query, config["max_results"])]
         if config["show_commands"]:
             lowered = query.lower()
@@ -277,9 +278,19 @@ class SearchLauncher(ThemedWindow):
         self.results.setFixedHeight(visible * row + 2 * self.results.frameWidth() + RESULTS_PADDING)
         self._fit_height()
 
+    # --- [Antigravity Start: App-Start mit Nutzungstracking (Rest: Claude Code)] ---
+    def _run_app(self, name: str, target: str) -> None:
+        if hasattr(self.ctx, "config") and hasattr(self.ctx.config, "record_app_launch"):
+            self.ctx.config.record_app_launch(name, target)
+        launch(self.ctx, target)
+    # --- [Antigravity Ende: App-Start mit Nutzungstracking] ---
+
     def _run(self, item: QListWidgetItem) -> None:
         result: Result = item.data(Qt.ItemDataRole.UserRole)
         self.dismiss()
+        if getattr(result, "app_name", ""):  # [Antigravity]
+            if hasattr(self.ctx, "config") and hasattr(self.ctx.config, "record_app_launch"):
+                self.ctx.config.record_app_launch(result.app_name, result.target)
         result.action()
 
     def _accept(self) -> None:

@@ -1,5 +1,12 @@
 # Änderungen
 
+## 3.8.3
+
+- **Neuer Hintergrund „Null“:** ein riesiger kalter Mond hinter dreidimensionalen Stacheln, ein weicher Schein, Filmkorn und leichte Farbsäume. „Scherben“ bleibt, wie er ist.
+- **Taskbar-Stabilität & Neu laden per Rechtsklick:** verhindert hängende Maus-, Drag- und Fokus-Zustände auf der Taskbar, holt minimierte Fenster zuverlässig zurück in den Vordergrund und setzt die Leiste bei Rechtsklick sowie über „Taskbar neu laden“ sofort zurück.
+- **Sidebar-Unterstützung (links/rechts):** ermöglicht im Dev-Build das Platzieren der Taskbar als vertikale Seitenleiste am linken oder rechten Bildschirmrand inkl. AppBar-Reservierung, Rand-Erkennung und vertikalem Drag & Drop.
+- **Such-Ranking nach Nutzungshäufigkeit & Claude-Knopf umschaltbar:** oft genutzte Apps mit Suchbegriff im Namen (z. B. „Minecraft Launcher“) werden vor weniger genutzten exakten Treffern priorisiert; der Claude-Knopf kann in Taskbar-Kontextmenü und Einstellungen wie die anderen Hauptbuttons ein- und ausgeschaltet werden.
+
 ## 3.8.2
 
 - **Updates laufen durch:** Nach „Jetzt aktualisieren“ installiert das Setup sofort, bleibt dabei sichtbar im Vordergrund und startet PopWin danach von selbst neu. Vorher wartete es versteckt hinter den Leisten auf einen Klick.

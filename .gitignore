@@ -3,6 +3,7 @@ config/*
 !config/config_manager.py
 nova/
 devtools/
+GEMINI.md
 /*.bat
 *.log
 *.log.*

@@ -219,6 +219,98 @@ def beam(phase, width):
     return polygon([(x - width, y) for y, x in wander] + [(x + width, y) for y, x in reversed(wander)])
 
 
+MOON = QPointF(WIDTH / 2, HEIGHT * 0.6)
+MOON_RADIUS = 540
+
+
+def spike_field(count, tall, seed):
+    """Lange, dünne Stacheln, die schräg aus dem Boden ragen; vorn höher und dunkler, hinten heller."""
+    random = np.random.default_rng(seed)
+    near_center = random.normal(0, 0.22, count)  # die meisten stehen vor dem Mond
+    looks = list(zip(random.uniform(0.7, 1.3, count), random.uniform(-0.45, 0.45, count), random.uniform(0, 1, count) < 0.25,
+                     random.uniform(-0.07, 0.07, count), random.uniform(0.45, 1.15, count)))  # Farbton und Sättigung je Stachel
+    return list(zip(WIDTH * (0.5 + np.clip(near_center, -0.62, 0.62)), random.uniform(80, 190, count), random.uniform(0.55, 1, count) * tall,
+                    random.uniform(-0.62, 0.62, count), random.integers(1, 3, count), random.uniform(0, TAU, count), looks))
+
+
+SPIKES = ((spike_field(16, 520, 31), QColor(44, 54, 104), QColor(120, 140, 220)),
+          (spike_field(14, 700, 32), QColor(24, 30, 66), QColor(96, 116, 200)),
+          (spike_field(12, 860, 33), QColor(10, 13, 32), QColor(70, 88, 170)))
+VIGNETTE = np.clip(1.15 - 0.95 * np.hypot((COLUMN[None, :] - WIDTH / 2) / (WIDTH * 0.62), (ROW - HEIGHT * 0.56) / (HEIGHT * 0.66)) ** 1.6,
+                   0.08, 1)[..., None].astype(np.float32)
+GRAIN = [np.random.default_rng(40 + index).normal(0, 6, (HEIGHT // 2, WIDTH // 2, 1)).repeat(2, 0).repeat(2, 1).astype(np.float32)
+         for index in range(1)]  # ein festes Muster: Wechselndes Korn machte das Video neunmal so groß
+EDGE = (SIDE ** 3)[None, :].astype(np.float32)  # Farbsäume nur zum Rand hin, wie bei einem alten Objektiv
+
+
+GLOW_SCALE = 8  # der Schein wird klein berechnet und weich hochgezogen: weich und schnell
+GLOW_COLOUR = np.array((150, 175, 255), np.float32)
+GLOW_STRENGTH = 0.42
+
+
+def box_blur(array, radius):
+    """Weichzeichnen ohne scipy: Mittelwert über ein Fenster, je Achse über kumulierte Summen."""
+    for axis in (0, 1):
+        padded = np.pad(array, [(radius + 1, radius) if index == axis else (0, 0) for index in range(2)], mode="edge")
+        summed = np.cumsum(padded, axis=axis)
+        array = (np.take(summed, range(2 * radius + 1, summed.shape[axis]), axis=axis)
+                 - np.take(summed, range(0, summed.shape[axis] - 2 * radius - 1), axis=axis)) / (2 * radius + 1)
+    return array
+
+
+def moon_glow(phase, pulse):
+    """Der weiche Schein, der nur von Mond und Lichtstrom ausgeht. Dreimal weichgezeichnet sieht es aus wie ein echtes Leuchten."""
+    small = QImage(WIDTH // GLOW_SCALE, HEIGHT // GLOW_SCALE, QImage.Format.Format_Grayscale8)
+    small.fill(0)
+    painter = QPainter(small)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(1 / GLOW_SCALE, 1 / GLOW_SCALE)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(255, 255, 255))
+    painter.drawEllipse(MOON, MOON_RADIUS + 5 * pulse, MOON_RADIUS + 5 * pulse)
+    painter.drawPolygon(beam(phase, 92))
+    painter.end()
+    mask = np.frombuffer(small.constBits(), np.uint8).reshape(small.height(), small.bytesPerLine())[:, :small.width()]
+    mask = mask.astype(np.float32) / 255
+    for _ in range(3):
+        mask = box_blur(mask, 20)
+    large = QImage(np.ascontiguousarray((mask * 255).astype(np.uint8)).tobytes(), small.width(), small.height(), small.width(),
+                   QImage.Format.Format_Grayscale8).scaled(WIDTH, HEIGHT, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                                           Qt.TransformationMode.SmoothTransformation)
+    full = np.frombuffer(large.constBits(), np.uint8).reshape(HEIGHT, large.bytesPerLine())[:, :WIDTH].astype(np.float32) / 255
+    return full[..., None] * GLOW_COLOUR * GLOW_STRENGTH
+
+
+def tinted(colour, hue, saturation, value):
+    """Dieselbe Grundfarbe, je Stachel etwas mehr ins Violette, Stahlgraue oder Cyan, heller oder dunkler."""
+    h, s, v, _a = QColor(colour).getHsvF()
+    return QColor.fromHsvF((h + hue) % 1, min(1.0, s * saturation), min(1.0, v * value))
+
+
+def paint_spike(painter, x, width, tall, lean, sway, body, rim, look):
+    """Eine Pyramide aus zwei Flächen: Die zum Mond liegt im Licht und wird zur Spitze hin heller, die andere im Schatten.
+    Jeder Stachel hat seine eigene Helligkeit, Gratlage und manchmal die Lichtseite vertauscht, damit nicht alle gleich aussehen."""
+    tone, offset, flipped, hue, saturation = look
+    tip = QPointF(x + np.sin(lean) * tall + sway, HEIGHT - np.cos(lean) * tall)
+    near = max(0.0, 1 - abs(tip.x() - MOON.x()) / (MOON_RADIUS * 1.3))  # vor dem Mond: Lichtseite fast weiß
+    body, rim = tinted(body, hue, saturation, tone), tinted(rim, hue, saturation * (1 - 0.6 * near), tone * (1 + 0.45 * near))
+    ridge = QPointF(x + width * offset, HEIGHT + 6)
+    left, right = QPointF(x - width, HEIGHT + 6), QPointF(x + width, HEIGHT + 6)
+    lit_left = (x > MOON.x()) != flipped  # rechts vom Mond fällt das Licht meist auf die linke Fläche
+    shade = QLinearGradient(tip, ridge)
+    shade.setColorAt(0, body.darker(115))
+    shade.setColorAt(1, body.darker(170))
+    light = QLinearGradient(tip, ridge)
+    light.setColorAt(0, rim.lighter(118))
+    light.setColorAt(0.45, rim)
+    light.setColorAt(1, body)
+    lit, dark = ((left, ridge), (ridge, right)) if lit_left else ((ridge, right), (left, ridge))
+    painter.setBrush(shade)
+    painter.drawPolygon(QPolygonF([dark[0], tip, dark[1]]))
+    painter.setBrush(light)
+    painter.drawPolygon(QPolygonF([lit[0], tip, lit[1]]))
+
+
 def shards(phase):
     """Ein Lichtstrahl fällt auf eine Sonne, Splitter steigen auf, und davor wiegt sich gezacktes Gras. Harte Ringe statt Weichzeichnen."""
     pulse = beat(phase, 10)
@@ -254,6 +346,46 @@ def shards(phase):
             sway = 26 * np.sin(cycles * phase + offset)
             painter.drawPolygon(polygon(((x - width, HEIGHT + 4), (x + lean + sway, HEIGHT - tall), (x + width, HEIGHT + 4))))
     return pixels(image, painter)
+
+
+def moon(phase):
+    """Wie „scherben“, nur düsterer: Ein riesiger kalter Mond hinter schwarzen Stacheln, ein Lichtstrom fällt hinein, Splitter treiben auf. Dazu Vignette,
+    Filmkorn und feine Farbsäume. Alle Bewegungen schließen nach einer Schleife nahtlos."""
+    pulse = beat(phase, 10)
+    image, painter = canvas((8, 11, 28))
+    painter.setPen(Qt.PenStyle.NoPen)
+    for ring in range(12, 0, -1):  # blauer Schein um den Mond, in harten Stufen statt Weichzeichnen
+        glow = (1 - ring / 12) ** 2.4
+        painter.setBrush(QColor(int(10 + 70 * glow), int(14 + 86 * glow), int(34 + 150 * glow)))
+        radius = MOON_RADIUS + ring * 70 + 8 * pulse
+        painter.drawEllipse(MOON, radius, radius)
+    painter.setBrush(QColor(170, 190, 255, 70))
+    painter.drawPolygon(beam(phase, 150))
+    painter.setBrush(QColor(236, 240, 255))
+    painter.drawEllipse(MOON, MOON_RADIUS + 5 * pulse, MOON_RADIUS + 5 * pulse)
+    painter.drawPolygon(beam(phase, 92))
+    for x, y, cycles, offset in SPECKS:
+        painter.setBrush(QColor(200, 214, 255, int(60 + 120 * np.sin(cycles * phase + offset) ** 2)))
+        painter.drawEllipse(QPointF(float(x), float(y)), 2.5, 2.5)
+    painter.setBrush(QColor(12, 16, 40))
+    for x, start, cycles, size, turn, direction in SHARDS:
+        rise = (start + cycles * phase / TAU) % 1
+        y = HEIGHT + 120 - rise * (HEIGHT + 240)
+        painter.drawPolygon(polygon(shard_points(x + 34 * np.sin(phase + turn), y, size * 1.4, turn + direction * phase)))
+    painter.setBrush(QColor(14, 18, 44))  # dunkler Grund: Vom Mond bleibt unten nichts zu sehen, wie hinter einem Hügel aus Stacheln
+    painter.drawPolygon(polygon([(0, HEIGHT + 10)] + [(x, HEIGHT - 330 - 90 * np.cos(x / WIDTH * TAU * 3) + 60 * np.cos(x / WIDTH * TAU * 7))
+                                                       for x in np.linspace(0, WIDTH, 40)] + [(WIDTH, HEIGHT + 10)]))
+    for spikes, body, rim in SPIKES:
+        for x, width, tall, lean, cycles, offset, look in spikes:
+            paint_spike(painter, x, width, tall, lean, 18 * np.sin(cycles * phase + offset), body, rim, look)
+    picture = (pixels(image, painter).reshape(HEIGHT, WIDTH, 3).astype(np.float32) + moon_glow(phase, pulse)) * VIGNETTE
+    shift = np.round(2 + EDGE * 4).astype(np.int32)[0]  # Rot nach außen, Blau nach innen: überall leicht, am Rand stärker
+    columns = np.arange(WIDTH)
+    outward = np.where(columns < HALF, 1, -1)
+    picture[..., 0] = picture[:, np.clip(columns + outward * shift, 0, WIDTH - 1), 0]
+    picture[..., 2] = picture[:, np.clip(columns - outward * shift, 0, WIDTH - 1), 2]
+    frame = int(round(phase / TAU * FRAMES)) % len(GRAIN)
+    return picture + GRAIN[frame]
 
 
 def mountains(count, tile, low, high, seed):
@@ -399,13 +531,23 @@ def saws(phase):
 
 
 LOOP_FRAMES = {"galaxie": FPS * 30, "gipfel": FPS * 30}  # eine Vierteldrehung darf ruhig länger dauern
-SCENES = {"galaxie": galaxy, "linien": lines, "wellen": waves, "waben": honeycomb, "kristall": crystal, "sterne": stars, "scherben": shards, "gipfel": summits, "dash": dash, "saegen": saws}
+SCENES = {"galaxie": galaxy, "linien": lines, "wellen": waves, "waben": honeycomb, "kristall": crystal, "sterne": stars, "scherben": shards, "gipfel": summits, "dash": dash, "saegen": saws, "null": moon}
+
+
+def ffmpeg_path() -> str:
+    """ffmpeg aus dem PATH, sonst das aus dem Paket imageio-ffmpeg (pip install imageio-ffmpeg)."""
+    import shutil
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    import imageio_ffmpeg
+    return imageio_ffmpeg.get_ffmpeg_exe()
 
 
 def render(name: str, scene) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     target = OUT / f"{name}.mp4"
-    command = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{WIDTH}x{HEIGHT}", "-r", str(FPS), "-i", "-",
+    command = [ffmpeg_path(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{WIDTH}x{HEIGHT}", "-r", str(FPS), "-i", "-",
                "-c:v", "libx264", "-preset", "slow", "-tune", "animation", "-crf", "25", "-g", "60",
                "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", str(target)]
     process = subprocess.Popen(command, stdin=subprocess.PIPE)

@@ -38,7 +38,9 @@ def fade_ghost(ctx, widget: QWidget) -> None:
 def animate_menu(ctx, menu: QMenu) -> None:
     animator = WindowAnimator(ctx, menu)
     opacity = menu.windowOpacity()
-    menu.aboutToShow.connect(lambda: QTimer.singleShot(0, lambda: animator.enter(opacity, slide=-6)))
+    # [Antigravity: Nur animieren, wenn das Menü noch sichtbar ist, und beim Schließen stoppen]
+    menu.aboutToShow.connect(lambda: QTimer.singleShot(0, lambda: menu.isVisible() and animator.enter(opacity, slide=-6)))
+    menu.aboutToHide.connect(animator._animation.stop)
     menu.aboutToHide.connect(lambda: fade_ghost(ctx, menu))
 
 

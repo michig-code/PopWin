@@ -50,8 +50,9 @@ def showing(window) -> bool:
 
 class ToolRow(ThemedWindow):
     def __init__(self, dock):
+        # [Antigravity: WindowDoesNotAcceptFocus verhindert Fokusverlust beim Klick auf die Symbolleiste]
         super().__init__(dock.ctx, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
-                         | Qt.WindowType.NoDropShadowWindowHint, dock.theme_name)
+                         | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.NoDropShadowWindowHint, dock.theme_name)
         self.dock = dock
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         outer = QHBoxLayout(self)

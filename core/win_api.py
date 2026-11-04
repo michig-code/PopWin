@@ -57,7 +57,12 @@ user32.IsIconic.argtypes = (wintypes.HWND,)
 user32.IsZoomed.argtypes = (wintypes.HWND,)
 user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
 user32.IsWindow.argtypes = (wintypes.HWND,)
+user32.BringWindowToTop.argtypes = (wintypes.HWND,)
+user32.SwitchToThisWindow.argtypes = (wintypes.HWND, wintypes.BOOL)
 user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.GetSystemMetrics.argtypes = (ctypes.c_int,)
 user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
 user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
 user32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
@@ -133,17 +138,38 @@ def bring_to_front(hwnd: int) -> None:
     user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
 
+# --- [Antigravity Start] Zuverlässige Maustasten-Prüfung & Vordergrund-Aktivierung (Rest: Claude Code) ---
+VK_LBUTTON, VK_RBUTTON, SM_SWAPBUTTON = 0x01, 0x02, 23
+VK_DUMMY = 0xE8
+
+
+def left_button_down() -> bool:
+    """Ist die linke Maustaste physisch gedrückt? Qt erfährt ein Loslassen manchmal nicht, wenn ein fremdes Fenster dazwischenfunkt."""
+    vk = VK_RBUTTON if user32.GetSystemMetrics(SM_SWAPBUTTON) else VK_LBUTTON
+    return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
 def force_foreground(hwnd: int) -> None:
-    """Holt ein eigenes Fenster nach vorn, auch wenn gerade ein anderes Programm aktiv ist."""
+    """Holt ein eigenes oder fremdes Fenster nach vorn, auch aus einer nicht-aktivierbaren Leiste heraus."""
     foreground = user32.GetForegroundWindow()
     if foreground == hwnd:
+        user32.BringWindowToTop(hwnd)
         return
-    other = user32.GetWindowThreadProcessId(foreground, None)
     this = kernel32.GetCurrentThreadId()
-    attached = bool(other) and other != this and user32.AttachThreadInput(this, other, True)
-    user32.SetForegroundWindow(hwnd)
-    if attached:
-        user32.AttachThreadInput(this, other, False)
+    other = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+    target = user32.GetWindowThreadProcessId(hwnd, None)
+    attached_other = bool(other) and other != this and bool(user32.AttachThreadInput(this, other, True))
+    attached_target = bool(target) and target not in (this, other) and bool(user32.AttachThreadInput(this, target, True))
+    try:
+        send_keys(VK_DUMMY)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached_target:
+            user32.AttachThreadInput(this, target, False)
+        if attached_other:
+            user32.AttachThreadInput(this, other, False)
+# --- [Antigravity Ende] ---
 
 
 # --- Monitore ----------------------------------------------------------------
@@ -581,7 +607,7 @@ def _main_process(exe: str, pid: int) -> tuple[str, int]:
 
 
 _popwin_apps: dict[int, str] = {}
-INTERNAL_APPS = ("settings", "widgets")  # Fenster von PopWin selbst: "Task beenden" träfe ganz PopWin
+INTERNAL_APPS = ("settings", "widgets", "dev")  # [Antigravity: dev ergänzt]
 _POPWIN_ROOT = str(Path(__file__).resolve().parent.parent).lower()
 
 
@@ -834,6 +860,10 @@ def activate_window(hwnd: int) -> None:
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, SW_RESTORE)
     force_foreground(hwnd)
+    # --- [Antigravity Start] Fallback auf SwitchToThisWindow ---
+    if user32.IsWindow(hwnd) and user32.GetForegroundWindow() != hwnd:
+        user32.SwitchToThisWindow(hwnd, True)
+    # --- [Antigravity Ende] ---
 
 
 def is_minimized(hwnd: int) -> bool:
