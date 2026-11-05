@@ -91,7 +91,7 @@ from ui.taskbar import (
 from ui.widgets import WIDGET_TYPES
 from ui.widgets.clock import ClockWidget
 from ui.widgets.gallery import WidgetGallery
-from ui.widgets.metrics import CpuWidget, format_speed
+from ui.widgets.metrics import CpuWidget, NetworkWidget, format_speed
 from ui.widgets.system import format_uptime
 from ui.widgets.time_widgets import format_stopwatch
 from ui.clock_place import PlacePicker
@@ -517,6 +517,94 @@ class Widgets(unittest.TestCase):
         gallery._remove(gallery.current)
         self.assertEqual(ctx.config.get("widgets"), [])
         self.assertIsNone(gallery.current)
+
+    def test_notes_widget_expands_freely_downwards(self):
+        # [Antigravity: Notiz-Widget vergrößert & verkleinert sich frei über Eckgriff inkl. Textfeld]
+        from PySide6.QtGui import QMouseEvent
+        ctx = self.context()
+        spec = {"id": "notes_1", "type": "notes", "data": {}, "options": {"width": 260, "height": 0}}
+        ctx.config.data["widgets"].append(spec)
+        w = NotesWidget(ctx, spec)
+        w.show()
+        self.addCleanup(w.hide)
+        self.assertFalse(hasattr(w, "bottom_grip"))
+        initial_w = w.width()
+        initial_h = w.height()
+        initial_edit_h = w.edit.height()
+
+        # 1. Vergrößern nach rechts und unten per Eckgriff (w.grip)
+        grip = w.grip
+        press_pos = grip.mapToGlobal(QPoint(8, 8))
+        grip.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPoint(8, 8), press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        drag_pos = press_pos + QPoint(100, 150)
+        grip.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPoint(108, 158), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+
+        self.assertGreater(w.width(), initial_w + 50)
+        self.assertGreater(w.height(), initial_h + 100)
+        self.assertGreater(w.edit.height(), initial_edit_h + 100)
+
+        # Loslassen speichert Breite und Höhe atomar
+        grip.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, QPoint(108, 158), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        self.assertEqual(w.spec["options"]["width"], w.width())
+        self.assertEqual(w.spec["options"]["height"], w.height())
+        enlarged_h = w.height()
+        enlarged_edit_h = w.edit.height()
+        self.assertGreater(enlarged_edit_h, initial_edit_h + 100)
+
+        # 2. Wieder verkleinern per Eckgriff
+        press_pos = grip.mapToGlobal(QPoint(8, 8))
+        grip.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPoint(8, 8), press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        drag_pos = press_pos + QPoint(-50, -50)
+        grip.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPoint(-42, -42), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+
+        self.assertLess(w.height(), enlarged_h)
+        self.assertLess(w.edit.height(), enlarged_edit_h)
+
+        grip.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, QPoint(-42, -42), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        self.assertEqual(w.spec["options"]["width"], w.width())
+        self.assertEqual(w.spec["options"]["height"], w.height())
+
+    def test_network_widget_resize_and_shrink(self):
+        # [Antigravity: Netz-Tempo Widget lässt sich über Eckgriff frei vergrößern und verkleinern]
+        from PySide6.QtGui import QMouseEvent
+        ctx = self.context()
+        spec = {"id": "net_test", "type": "network", "data": {}, "options": {}}
+        ctx.config.data["widgets"].append(spec)
+        w = NetworkWidget(ctx, spec)
+        w.show()
+        self.addCleanup(w.hide)
+        initial_w = w.width()
+        initial_h = w.height()
+        self.assertGreater(w.gauge.height(), 0)
+        self.assertTrue(w.download.text().startswith("↓"))
+        self.assertTrue(w.upload.text().startswith("↑"))
+
+        # 1. Vergrößern (+60, +70)
+        grip = w.grip
+        press_pos = grip.mapToGlobal(QPoint(8, 8))
+        grip.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPoint(8, 8), press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        drag_pos = press_pos + QPoint(60, 70)
+        grip.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPoint(68, 78), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        grip.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, QPoint(68, 78), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+
+        enlarged_w = w.width()
+        enlarged_h = w.height()
+        self.assertGreater(enlarged_w, initial_w)
+        self.assertGreater(enlarged_h, initial_h)
+        self.assertEqual(w.spec["options"]["width"], enlarged_w)
+        self.assertEqual(w.spec["options"]["height"], enlarged_h)
+
+        # 2. Wieder verkleinern (-60, -70)
+        press_pos = grip.mapToGlobal(QPoint(8, 8))
+        grip.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPoint(8, 8), press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        drag_pos = press_pos + QPoint(-60, -70)
+        grip.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPoint(-52, -62), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        grip.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, QPoint(-52, -62), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+
+        self.assertLess(w.width(), enlarged_w)
+        self.assertLess(w.height(), enlarged_h)
+        self.assertEqual(w.width(), initial_w)
+        self.assertEqual(w.height(), initial_h)
 
 
 class WinKeyDock(unittest.TestCase):
@@ -5007,11 +5095,25 @@ class NovaArtifacts(unittest.TestCase):
         cards = panel.artifacts.findChildren(QWidget, "NovaArtifactCard")
         self.assertEqual(len(cards), 1)
         self.assertEqual(panel.tabs[1].text(), "Artefakte · 1")
+        # [Antigravity Start: Test für sauberes Umschalten ohne überlappenden "Neues Artefakt"-Button]
+        create_buttons = [b for b in panel.artifacts.findChildren(QPushButton) if b.text() == "Neues Artefakt"]
+        self.assertEqual(len(create_buttons), 1)
+
         panel.artifacts.open_artifact(made)
         steps = panel.artifacts.findChildren(QCheckBox, "NovaArtifactStep")
         self.assertEqual([step.text() for step in steps], ["A", "B"])
         steps[0].setChecked(True)
         self.assertEqual(nova_artifacts.progress(self.nova.artifacts.get(made)), (1, 2))
+
+        # "Neues Artefakt" darf im Detail nicht mehr sichtbar sein
+        create_in_detail = [b for b in panel.artifacts.findChildren(QPushButton) if b.text() == "Neues Artefakt" and b.isVisibleTo(panel.artifacts)]
+        self.assertEqual(len(create_in_detail), 0)
+
+        # Zurück zur Liste: "Neues Artefakt" existiert wieder genau einmal
+        panel.artifacts.open_artifact("")
+        create_back = [b for b in panel.artifacts.findChildren(QPushButton) if b.text() == "Neues Artefakt" and b.isVisibleTo(panel.artifacts)]
+        self.assertEqual(len(create_back), 1)
+        # --- [Antigravity Ende] ---
 
 
 class NovaWatch(unittest.TestCase):
@@ -5454,9 +5556,14 @@ class ClaudeKnopf(unittest.TestCase):
             with unittest.mock.patch.object(win_api, "foreground_window", return_value=99):
                 self.assertEqual(claude_button.press(ctx), "nach vorn")
             raised.assert_called_once_with(10)
-            with unittest.mock.patch.object(win_api, "foreground_window", return_value=10):
+            with unittest.mock.patch.object(win_api, "foreground_window", return_value=10), \
+                    unittest.mock.patch.object(win_api, "is_minimized", return_value=False):
                 self.assertEqual(claude_button.press(ctx), "abgelegt")
             put_away.assert_called_once_with(10)
+            with unittest.mock.patch.object(win_api, "foreground_window", return_value=10), \
+                    unittest.mock.patch.object(win_api, "is_minimized", return_value=True):
+                self.assertEqual(claude_button.press(ctx), "nach vorn")
+            self.assertEqual(raised.call_count, 2)
 
     def test_dev_build_has_the_button_left_and_no_claude_task(self):
         ctx = ResetContext()
@@ -5496,6 +5603,24 @@ class ClaudeKnopf(unittest.TestCase):
         dock.nova.setFixedWidth(100)
         dock._align_icons()
         self.assertEqual((dock.pad.minimumWidth(), dock.pad_end.minimumWidth()), (100 - 40, 0))  # rechts mehr: Platz links
+
+    def test_claude_button_context_menu_toggle(self):
+        # [Antigravity: Claude-Knopf per Kontextmen umschaltbar wie andere Buttons]
+        ctx = ResetContext()
+        with unittest.mock.patch("ui.taskbar.is_dev", return_value=True):
+            dock = Dock(ctx, QGuiApplication.primaryScreen(), "bottom")
+            self.addCleanup(dock.hide)
+            self.assertTrue(dock.claude.isVisibleTo(dock))
+            menu = themed_menu(dock.ctx, dock, dock.theme_name)
+            dock.add_bar_options(menu)
+            claude_actions = [a for a in menu.actions() if a.text() == "Claude-Knopf"]
+            self.assertEqual(len(claude_actions), 1)
+            action = claude_actions[0]
+            self.assertTrue(action.isCheckable())
+            self.assertTrue(action.isChecked())
+            action.trigger()  # toggles to False
+            self.assertFalse(dock.option("dev_claude_button"))
+            self.assertFalse(dock.claude.isVisibleTo(dock))
         dock.hide()
 
 
@@ -5506,6 +5631,234 @@ class StartScript(unittest.TestCase):
         self.assertIn('-c "import sys"', script)  # eine mitkopierte .venv eines anderen PCs wird erkannt
         self.assertIn("requirements.installed", script)  # neue Pakete kommen von selbst dazu
         self.assertNotIn("copilot_pro", script)
+
+
+# --- [Antigravity Start] Tests für Taskbar-Selbstreparatur, Fokus & Drag-Ursprung (Rest: Claude Code) ---
+class TaskbarRepair(unittest.TestCase):
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.config.set("animations.enabled", False)
+        self.ctx.config.set("taskbar.pinned", [
+            {"name": "A", "target": r"C:\a.exe", "exe": "a.exe"},
+            {"name": "B", "target": r"C:\b.exe", "exe": "b.exe"},
+            {"name": "C", "target": r"C:\c.exe", "exe": "c.exe"},
+        ], notify=False)
+        self.ctx.windows = lambda: []
+        self.dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        self.dock.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.dock.show()
+        self.dock.refresh(force=True)
+        self.addCleanup(self.dock.hide)
+
+    def test_minimized_foreground_window_is_activated_instead_of_minimized_again(self):
+        button = self.dock._buttons["a.exe"]
+        button.windows = [win_api.WindowInfo(42, "App A", r"C:\a.exe", 1)]
+        with unittest.mock.patch.object(win_api, "is_window", return_value=True), \
+                unittest.mock.patch.object(win_api, "foreground_window", return_value=42), \
+                unittest.mock.patch.object(win_api, "is_minimized", return_value=True), \
+                unittest.mock.patch.object(win_api, "activate_window") as activate, \
+                unittest.mock.patch.object(win_api, "minimize_window") as minimize:
+            button._activate()
+        activate.assert_called_once_with(42)
+        minimize.assert_not_called()
+
+    def test_repair_and_context_menu_unstick_taskbar_and_offer_reload(self):
+        button = self.dock._buttons["a.exe"]
+        button._dragging = True
+        button._press = QPoint(5, 5)
+        button.setDown(True)
+        self.dock._dragged = button
+        self.dock._dropping = button
+        self.dock._order_held = True
+        self.dock.repair(rebuild=False)
+        self.assertFalse(button._dragging)
+        self.assertIsNone(button._press)
+        self.assertFalse(button.isDown())
+        self.assertIsNone(self.dock._dragged)
+        self.assertIsNone(self.dock._dropping)
+        self.assertFalse(self.dock._order_held)
+
+        menu = QMenu()
+        self.dock.add_bar_options(menu)
+        labels = [action.text() for action in menu.actions() if action.text()]
+        self.assertIn("Taskbar neu laden", labels)
+
+    def test_dragging_first_icon_keeps_slot_origin_stable(self):
+        first = self.dock._buttons["a.exe"]
+        origin_before = self.dock._slots(self.dock._shown_keys())["a.exe"]
+        start_x = first.mapToGlobal(QPoint(5, 5)).x()
+        with unittest.mock.patch("ui.taskbar.QApplication.mouseButtons", return_value=Qt.MouseButton.LeftButton):
+            self.dock.drag_task(first, start_x + 25, start_x)
+            self.dock.drag_task(first, start_x + 45, start_x)
+            slots_during = self.dock._slots(self.dock._shown_keys())
+        self.assertEqual(min(slots_during.values()), origin_before)
+        self.dock.finish_drag()
+        self.assertFalse(first._dragging)
+
+
+# --- [Antigravity Ende] ---
+
+
+# --- [Antigravity Start: Sidebar Support Tests] ---
+class SidebarSupport(unittest.TestCase):
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.config.set("animations.enabled", False)
+        self.ctx.config.set("taskbar.pinned", [
+            {"name": "A", "target": r"C:\a.exe", "exe": "a.exe"},
+            {"name": "B", "target": r"C:\b.exe", "exe": "b.exe"},
+            {"name": "C", "target": r"C:\c.exe", "exe": "c.exe"},
+        ], notify=False)
+        self.ctx.windows = lambda: []
+        self.screen = QGuiApplication.primaryScreen()
+
+    def test_sidebar_logic_and_release_availability(self):
+        # [Antigravity: Sidebar ist nun regulärer Bestandteil des Release-Builds]
+        from ui import sidebar
+        self.assertTrue(sidebar.sidebar_active())
+        positions = sidebar.taskbar_positions()
+        self.assertIn("left", positions)
+        self.assertIn("right", positions)
+        self.assertEqual(sidebar.effective_edge("left"), "left")
+        self.assertEqual(sidebar.effective_edge("right"), "right")
+
+        with unittest.mock.patch.object(sidebar, "SIDEBAR_ENABLED", False):
+            self.assertFalse(sidebar.sidebar_active())
+            self.assertEqual(sidebar.effective_edge("left"), "bottom")
+            self.assertEqual(sidebar.effective_edge("right"), "bottom")
+            disabled_positions = sidebar.taskbar_positions()
+            self.assertNotIn("left", disabled_positions)
+            self.assertNotIn("right", disabled_positions)
+
+    def test_sidebar_vertical_dock_and_hot_zone(self):
+        from ui.base import in_hot_zone
+        from PySide6.QtWidgets import QBoxLayout
+        area = (0, 0, 1920, 1080)
+        self.assertTrue(in_hot_zone(2, 500, area, "left", 6))
+        self.assertFalse(in_hot_zone(50, 500, area, "left", 6))
+        self.assertTrue(in_hot_zone(1918, 500, area, "right", 6))
+        self.assertFalse(in_hot_zone(1800, 500, area, "right", 6))
+
+        dock = Dock(self.ctx, self.screen, "left")
+        dock.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        dock.show()
+        self.addCleanup(dock.hide)
+        dock.refresh(force=True)
+        self.assertEqual(dock.edge, "left")
+        self.assertEqual(dock.root.layout().direction(), QBoxLayout.Direction.TopToBottom)
+        self.assertEqual(dock.apps.direction(), QBoxLayout.Direction.TopToBottom)
+        slots = dock._slots(dock._shown_keys())
+        self.assertLess(slots["a.exe"], slots["b.exe"])
+# --- [Antigravity Ende: Sidebar Support] ---
+
+
+# --- [Antigravity Start: App-Suchranking & Claude-Knopf Tests (Rest: Claude Code)] ---
+class AppSearchRanking(unittest.TestCase):
+    def setUp(self):
+        self.index = AppIndex()
+        self.pool = [
+            App("Minecraft", "C:\\Games\\Minecraft.exe"),
+            App("Minecraft Launcher", "C:\\Games\\MinecraftLauncher.exe"),
+            App("Minecraft Bedrock Edition", "shell:AppsFolder\\MinecraftBedrock"),
+            App("Badlion Minecraft Client", "C:\\Games\\Badlion.exe"),
+            App("Calculator", "calc.exe"),
+        ]
+
+    def test_usage_frequency_ranks_higher_than_exact_match(self):
+        # Häufiger genutzte App mit Suchbegriff im Namen ("Minecraft Launcher") überholt exakten Treffer ("Minecraft")
+        usage = {
+            "minecraft launcher": 10,
+            "minecraft": 2,
+        }
+        results = self.index.search("minecraft", 4, pool=self.pool, usage=usage)
+        self.assertEqual(results[0].name, "Minecraft Launcher")
+        self.assertEqual(results[1].name, "Minecraft")
+
+    def test_exact_match_wins_when_usage_is_higher_or_equal(self):
+        # Wenn "Minecraft" häufiger oder gleich oft genutzt wird, bleibt der exakte Treffer vorne
+        usage_higher = {"minecraft": 10, "minecraft launcher": 2}
+        results_higher = self.index.search("minecraft", 4, pool=self.pool, usage=usage_higher)
+        self.assertEqual(results_higher[0].name, "Minecraft")
+        self.assertEqual(results_higher[1].name, "Minecraft Launcher")
+
+        usage_equal = {"minecraft": 5, "minecraft launcher": 5}
+        results_equal = self.index.search("minecraft", 4, pool=self.pool, usage=usage_equal)
+        self.assertEqual(results_equal[0].name, "Minecraft")
+        self.assertEqual(results_equal[1].name, "Minecraft Launcher")
+
+    def test_default_sorting_when_no_usage(self):
+        # Ohne Nutzung: Exakter Treffer > Prefix > Kürzere Länge > Wort-Treffer
+        results = self.index.search("minecraft", 4, pool=self.pool, usage={})
+        self.assertEqual(results[0].name, "Minecraft")
+        self.assertEqual(results[1].name, "Minecraft Launcher")
+        self.assertEqual(results[2].name, "Minecraft Bedrock Edition")
+        self.assertEqual(results[3].name, "Badlion Minecraft Client")
+
+    def test_word_match_beats_exact_match_if_used_more(self):
+        # App mit Suchwort im Namen ("Badlion Minecraft Client") überholt "Minecraft", wenn deutlich häufiger genutzt
+        usage = {
+            "badlion minecraft client": 15,
+            "minecraft": 1,
+        }
+        results = self.index.search("minecraft", 4, pool=self.pool, usage=usage)
+        self.assertEqual(results[0].name, "Badlion Minecraft Client")
+        self.assertEqual(results[1].name, "Minecraft")
+
+    def test_config_record_app_launch_and_get_usage(self):
+        import tempfile
+        from pathlib import Path
+        from config.config_manager import ConfigManager
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = ConfigManager(Path(folder) / "settings.json")
+            self.assertEqual(cfg.get_app_usage(), {})
+            cfg.record_app_launch("Minecraft Launcher", "C:\\Games\\MinecraftLauncher.exe")
+            usage = cfg.get_app_usage()
+            self.assertEqual(usage.get("minecraft launcher"), 1)
+            self.assertEqual(usage.get("c:\\games\\minecraftlauncher.exe"), 1)
+            cfg.record_app_launch("Minecraft Launcher", "C:\\Games\\MinecraftLauncher.exe")
+            usage = cfg.get_app_usage()
+            self.assertEqual(usage.get("minecraft launcher"), 2)
+
+    def test_search_launcher_tab_navigation(self):
+        # [Antigravity: TAB- und Shift+TAB-Navigation durch Suchergebnisse]
+        from ui.search_launcher import SearchLauncher, Result
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent, Qt
+        ctx = ResetContext()
+        launcher = SearchLauncher(ctx)
+        self.addCleanup(launcher.deleteLater)
+        executed = []
+        launcher._collect = lambda text: [
+            Result("App 1", lambda: executed.append(1)),
+            Result("App 2", lambda: executed.append(2)),
+            Result("App 3", lambda: executed.append(3)),
+        ]
+        launcher._update_results("app")
+        self.assertEqual(launcher.results.count(), 3)
+        self.assertEqual(launcher.results.currentRow(), 0)
+
+        # TAB -> advances to row 1
+        tab_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier)
+        launcher.eventFilter(launcher.input, tab_event)
+        self.assertEqual(launcher.results.currentRow(), 1)
+
+        # TAB -> advances to row 2
+        launcher.eventFilter(launcher.input, tab_event)
+        self.assertEqual(launcher.results.currentRow(), 2)
+
+        # TAB -> wraps around to row 0
+        launcher.eventFilter(launcher.input, tab_event)
+        self.assertEqual(launcher.results.currentRow(), 0)
+
+        # Shift+TAB (Backtab) -> wraps backwards to row 2
+        backtab_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+        launcher.eventFilter(launcher.input, backtab_event)
+        self.assertEqual(launcher.results.currentRow(), 2)
+
+        # Accept executes currently selected item (row 2 -> App 3)
+        launcher._accept()
+        self.assertEqual(executed, [3])
+# --- [Antigravity Ende: App-Suchranking & Claude-Knopf Tests] ---
 
 
 if __name__ == "__main__":

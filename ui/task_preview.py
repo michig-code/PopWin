@@ -145,8 +145,15 @@ class TaskPreview(ThemedWindow):
         area = button.screen().availableGeometry()
         x = max(area.left() + 6, min(anchor.x() - self.width() // 2, area.right() - self.width() - 6))
         y = button.mapToGlobal(QPoint(0, button.height())).y() + 10 if below else anchor.y() - self.height() - 10
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if button.dock.edge in ("left", "right"):
+            side_y = button.mapToGlobal(QPoint(0, button.height() // 2)).y() - self.height() // 2
+            y = max(area.top() + 6, min(side_y, area.bottom() - self.height() - 6))
+            x = (button.dock.mapToGlobal(QPoint(button.dock.width(), 0)).x() + 10 if button.dock.edge == "left"
+                 else button.dock.mapToGlobal(QPoint(0, 0)).x() - self.width() - 10)
         self.move(x, y)
-        fresh = not self.isVisible()
+        # --- [Antigravity Ende: Sidebar Support] ---
+        fresh = not self.isVisible() or self.animator.closing  # [Antigravity: Auch beim Schließen neu einblenden]
         self.show()
         hwnd = int(self.winId())
         win_api.set_zorder(hwnd, win_api.HWND_TOPMOST)

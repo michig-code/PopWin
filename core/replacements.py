@@ -15,7 +15,7 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets" / "apps"
 EXPLORER_LINKS = ("file explorer", "datei-explorer", "explorer")
 POPWIN_NAMES = {"explorer": "PopWin Explorer", "settings": "PopWin Einstellungen", "nova": "Nova",
                 "editor": "PopWin Editor", "terminal": "PopWin Terminal", "studio": "PowerShell Studio", "widgets": "PopWin Widgets",
-                "stream": "PopWin Stream"}
+                "stream": "PopWin Stream", "dev": "PopWin Dev"}  # [Antigravity]
 TERMINALS = ("cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe", "windowsterminal.exe")
 
 
@@ -83,11 +83,25 @@ def taskbar_slot(ctx, app: str) -> tuple[str, dict]:
         if replacement.key == app and ctx.config.get(f"replacements.{app}"):
             return replacement.exe, {"target": replacement.exe, "name": POPWIN_NAMES[app].removeprefix("PopWin "),
                                      "windows": []}
-    return f"popwin:{app}", {"target": "", "name": POPWIN_NAMES[app], "icon": app_icon(app), "windows": []}
+    return f"popwin:{app}", {"target": "", "name": POPWIN_NAMES[app], "icon": app_icon(app), "windows": []}  # [Antigravity]
 
 
 def launch(ctx, target: str) -> bool:
     """Startet die PopWin-Version, falls es eine gibt und sie eingeschaltet ist, sonst das Original."""
+    if hasattr(ctx, "config") and hasattr(ctx.config, "record_app_launch") and target:  # [Antigravity]
+        ctx.config.record_app_launch("", target)
+    # --- [Antigravity Start] Interne PopWin-Apps starten ---
+    if target == "popwin:dev":
+        from core.dev import open_dev_menu
+        open_dev_menu(ctx)
+        return True
+    if target == "popwin:settings":
+        ctx.open_settings()
+        return True
+    if target == "popwin:widgets":
+        ctx.open_widgets()
+        return True
+    # --- [Antigravity Ende] ---
     for replacement in REPLACEMENTS:
         if ctx.config.get(f"replacements.{replacement.key}") and replacement.matches(target):
             replacement.open(ctx, target)

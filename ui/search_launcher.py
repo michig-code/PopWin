@@ -103,6 +103,7 @@ class Result:
     action: Callable[[], None]
     target: str = ""
     glyph: str = ""
+    app_name: str = ""  # [Antigravity: App-Name für Nutzungstracking]
 
 
 class SearchLauncher(ThemedWindow):
@@ -209,10 +210,23 @@ class SearchLauncher(ThemedWindow):
             if key == Qt.Key.Key_Escape:
                 self.dismiss()
                 return True
-            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up) and self.results.count():
-                step = 1 if key == Qt.Key.Key_Down else -1
-                self.results.setCurrentRow((self.results.currentRow() + step) % self.results.count())
+            # --- [Antigravity Start: TAB- & Pfeiltasten-Navigation durch Suchergebnisse (Rest: Claude Code)] ---
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                if self.results.count():
+                    is_backward = (
+                        key == Qt.Key.Key_Up
+                        or key == Qt.Key.Key_Backtab
+                        or (key == Qt.Key.Key_Tab and bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+                    )
+                    step = -1 if is_backward else 1
+                    current = self.results.currentRow()
+                    if current < 0:
+                        current = 0 if step == 1 else self.results.count() - 1
+                    else:
+                        current = (current + step) % self.results.count()
+                    self.results.setCurrentRow(current)
                 return True
+            # --- [Antigravity Ende: TAB- & Pfeiltasten-Navigation] ---
         return super().eventFilter(watched, event)
 
     # --- Ergebnisse ---------------------------------------------------------
@@ -234,7 +248,7 @@ class SearchLauncher(ThemedWindow):
             results.append(Result(label, lambda: self.ctx.set_dark_mode(mode)))
         if wants_studio(query):
             results.append(Result("PowerShell Studio", lambda: self.ctx.open_app("studio"), STUDIO_ICON))
-        results += [Result(a.name, lambda t=a.target: launch(self.ctx, t), a.target)
+        results += [Result(a.name, lambda t=a.target, n=a.name: self._run_app(n, t), a.target, app_name=a.name)  # [Antigravity]
                     for a in self.ctx.apps.search(query, config["max_results"])]
         if config["show_commands"]:
             lowered = query.lower()
@@ -277,9 +291,19 @@ class SearchLauncher(ThemedWindow):
         self.results.setFixedHeight(visible * row + 2 * self.results.frameWidth() + RESULTS_PADDING)
         self._fit_height()
 
+    # --- [Antigravity Start: App-Start mit Nutzungstracking (Rest: Claude Code)] ---
+    def _run_app(self, name: str, target: str) -> None:
+        if hasattr(self.ctx, "config") and hasattr(self.ctx.config, "record_app_launch"):
+            self.ctx.config.record_app_launch(name, target)
+        launch(self.ctx, target)
+    # --- [Antigravity Ende: App-Start mit Nutzungstracking] ---
+
     def _run(self, item: QListWidgetItem) -> None:
         result: Result = item.data(Qt.ItemDataRole.UserRole)
         self.dismiss()
+        if getattr(result, "app_name", ""):  # [Antigravity]
+            if hasattr(self.ctx, "config") and hasattr(self.ctx.config, "record_app_launch"):
+                self.ctx.config.record_app_launch(result.app_name, result.target)
         result.action()
 
     def _accept(self) -> None:

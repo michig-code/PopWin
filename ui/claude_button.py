@@ -44,7 +44,8 @@ def press(ctx) -> str:
         win_api.shell_open(claude_target(ctx))
         return "geöffnet"
     foreground = win_api.foreground_window()
-    front = next((window for window in windows if window.hwnd == foreground), None)
+    # [Antigravity: Minimiertes Fenster mit altem Foreground-Handle nicht erneut minimieren]
+    front = next((window for window in windows if window.hwnd == foreground and not win_api.is_minimized(window.hwnd)), None)
     if front is not None:
         win_api.minimize_window(front.hwnd)
         return "abgelegt"

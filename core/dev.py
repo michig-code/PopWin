@@ -24,4 +24,15 @@ def dev_menu_wanted(query: str) -> bool:
 def open_dev_menu(ctx) -> None:
     """Über importlib: So sieht PyInstaller den Ordner devtools nicht und packt ihn nie ein. Die PIN fragt das Menü selbst."""
     import importlib
-    importlib.import_module("devtools.menu").open_menu(ctx)
+    # --- [Antigravity Start] Live-Reload & Reset für das Dev-Menü (Rest: Claude Code) ---
+    import sys
+    for name in ("devtools.pin", "devtools.release", "devtools.menu"):
+        if name in sys.modules:
+            try:
+                importlib.reload(sys.modules[name])
+            except Exception:
+                pass
+    menu_mod = importlib.import_module("devtools.menu")
+    menu_mod._menu = None
+    menu_mod.open_menu(ctx)
+    # --- [Antigravity Ende] ---

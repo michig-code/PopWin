@@ -34,7 +34,7 @@ FREE_SOURCES = {"Pexels": "https://www.pexels.com/search/videos/abstract%20loop/
 FOLDER = DATA_DIR / "wallpapers"
 PRESET_FOLDER = ROOT / "assets" / "wallpapers"
 PRESETS = {"galaxie": "Galaxie", "linien": "Linien", "wellen": "Wellen", "waben": "Waben", "kristall": "Kristall", "sterne": "Sterne",
-           "scherben": "Scherben", "gipfel": "Gipfel", "dash": "Dash", "saegen": "Sägen"}
+           "scherben": "Scherben", "gipfel": "Gipfel", "dash": "Dash", "saegen": "Sägen", "null": "Null"}
 PRESET_PREFIX = "preset:"
 AUTO, ENGINE, OWN = "auto", "engine", "popwin"
 ENGINE_START = f"steam://rungameid/{ENGINE_STEAM_ID}"

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QPlainTextEdit
+from PySide6.QtWidgets import QPlainTextEdit, QSizePolicy
 
 from ui.base import G
 from ui.widgets.base import DeskletWindow, Option
@@ -27,26 +27,30 @@ class NotesWidget(DeskletWindow):
         self.add_title()
         self.edit = QPlainTextEdit(self.spec.get("data", {}).get("text", ""))
         self.edit.setPlaceholderText("Notiz schreiben …")
-        self.body.addWidget(self.edit)
+        self.edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.body.addWidget(self.edit, 1)  # [Antigravity: stretch=1 füllt den gesamten vertikalen Raum]
         self._save_timer = QTimer(self, singleShot=True, interval=600)
         self._save_timer.timeout.connect(self._save)
         self.edit.textChanged.connect(self._save_timer.start)
 
+    # --- [Antigravity Start: Freies Vergrößern des Textfelds nach unten (Rest: Claude Code)] ---
     def _stretch(self) -> None:
         """Das Textfeld füllt, was das Fenster hergibt."""
         self.edit.setMinimumHeight(self.MIN_TEXT)
         self.edit.setMaximumHeight(QWIDGETSIZE_MAX)
 
     def options_changed(self) -> None:
-        if self.option("height"):
-            self._stretch()
-        else:
-            self.edit.setFixedHeight(self.TEXT_HEIGHT)
+        self._stretch()
         self.edit.setStyleSheet(f"font-size: {self.option('font')}px;")
 
     def preview_size(self, width: int, height: int) -> None:
-        self._stretch()  # sonst hielte die alte feste Höhe das Fenster beim Ziehen fest
+        self._stretch()
         super().preview_size(width, height)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._stretch()
+    # --- [Antigravity Ende: Freies Vergrößern des Textfelds nach unten] ---
 
     def _save(self) -> None:
         self.ctx.widgets.update_spec(self.spec["id"], data={"text": self.edit.toPlainText()})

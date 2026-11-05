@@ -1,5 +1,13 @@
 # Änderungen
 
+## 3.8.4
+
+- **Suchleisten-Navigation per TAB:** Mit TAB und Shift+TAB (sowie den Pfeiltasten) kann nach einer Suche direkt durch die angezeigten Treffer navigiert werden.
+- **Taskbar als Seitenleiste (links/rechts):** Die Taskleiste kann nun flexibel am linken oder rechten Bildschirmrand als vertikale Seitenleiste platziert werden (inkl. automatischer Layout-Anpassung und Bildschirmplatz-Reservierung).
+- **Nova-Artefakte Fehlerbehebung:** Verhindert das optische Glitchen und Überlappen des „Neues Artefakt“-Buttons mit dem Zurück-Button und dem Titel beim Wechsel in die Artefakt-Detailansicht.
+- **Notiz-Widget frei vergrößerbar:** Das Notizzettel-Widget lässt sich über den Eckgriff unten rechts stufenlos nach rechts und nach unten vergrößern und verkleinern, wobei sich das Textfeld dynamisch mit anpasst.
+- **Messwert- & Netz-Tempo-Widgets frei skalierbar & sauberes Layout:** Behebt das automatische Anwachsen der Widgets beim Ziehen am Eckgriff; Download- und Upload-Raten sind beim Netz-Tempo nun übersichtlich zusammen unten unter dem freien Verlauf platziert.
+
 ## 3.8.2
 
 - **Updates laufen durch:** Nach „Jetzt aktualisieren“ installiert das Setup sofort, bleibt dabei sichtbar im Vordergrund und startet PopWin danach von selbst neu. Vorher wartete es versteckt hinter den Leisten auf einen Klick.

@@ -139,6 +139,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "shell": {"hide_native_taskbar": True, "saved_taskbar_state": None},
     "updates": {"auto_check": True, "skipped": ""},
+    "app_usage": {},  # [Antigravity: App-Nutzungshäufigkeit für Such-Ranking]
 }
 
 MONITOR_DEFAULTS: dict[str, Any] = {
@@ -373,3 +374,32 @@ class ConfigManager(QObject):
         except Exception as exc:
             log.error("Keyring nicht beschreibbar: %s", exc)
             return False
+
+    # --- [Antigravity Start: App-Nutzungshäufigkeit für Such-Ranking (Rest: Claude Code)] ---
+    def record_app_launch(self, name: str, target: str = "") -> None:
+        usage = self.data.setdefault("app_usage", {})
+        dirty = False
+        for raw in (name, target):
+            key = raw.lower().strip()
+            if key:
+                entry = usage.get(key)
+                if isinstance(entry, dict):
+                    entry["count"] = entry.get("count", 0) + 1
+                elif isinstance(entry, (int, float)):
+                    usage[key] = {"count": int(entry) + 1}
+                else:
+                    usage[key] = {"count": 1}
+                dirty = True
+        if dirty:
+            self.save()
+
+    def get_app_usage(self) -> dict[str, int]:
+        raw = self.data.get("app_usage", {})
+        result: dict[str, int] = {}
+        for k, v in raw.items():
+            if isinstance(v, dict):
+                result[k] = int(v.get("count", 0))
+            elif isinstance(v, (int, float)):
+                result[k] = int(v)
+        return result
+    # --- [Antigravity Ende: App-Nutzungshäufigkeit für Such-Ranking] ---

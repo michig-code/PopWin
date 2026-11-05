@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QApplication, QBoxLayout, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QVBoxLayout, QWidget,  # [Antigravity]
 )
 
 from core import win_api
@@ -18,6 +18,7 @@ from core.dev import is_dev
 from ui.claude_button import ClaudeButton, is_claude_window
 from ui.clock_place import ClockFace, ClockPill
 from ui.dock_tools import TOOL_ITEMS, ToolRow
+from ui import sidebar  # [Antigravity]
 from ui.base import BarWindow, G, IconButton, NovaButton, glyph_icon, icon_for_target, in_hot_zone, set_prop, themed_menu  # noqa: F401
 
 
@@ -251,6 +252,10 @@ class Trash(IconButton):
         QTimer.singleShot(0, lambda: win_api.move_to_recycle_bin(paths))
 
     def contextMenuEvent(self, event) -> None:
+        # --- [Antigravity Start] Selbstreparatur bei Rechtsklick auf den Papierkorb (Rest: Claude Code) ---
+        if isinstance(self.window(), Dock):
+            self.window().repair(rebuild=False)
+        # --- [Antigravity Ende] ---
         count, size = win_api.recycle_bin_info()
         menu = themed_menu(self.ctx, self, self.theme_name)
         info = menu.addAction(f"{count} Elemente · {format_size(size)}")
@@ -325,6 +330,14 @@ class TaskButton(QPushButton):
         if self.dock.task_indicator == "dot":
             width = height = self.DOT_FOCUSED if self.property("focused") else self.DOT
         painter.setBrush(color)
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if self.dock.edge in ("left", "right"):
+            mark_w, mark_h = (width, width) if self.dock.task_indicator == "dot" else (height, width)
+            x = 2.0 if self.dock.edge == "left" else (self.dock.root.width() - mark_w - 2.0)
+            y = origin.y() + (self.height() - mark_h) / 2
+            painter.drawRoundedRect(QRectF(x, y, mark_w, mark_h), mark_w / 2, mark_w / 2)
+            return
+        # --- [Antigravity Ende: Sidebar Support] ---
         x = origin.x() + (self.width() - width) / 2
         y = mark_y(origin.y(), self.height(), self.iconSize().height(), bar_height, height)
         painter.drawRoundedRect(QRectF(x, y, width, height), height / 2, height / 2)
@@ -368,6 +381,15 @@ class TaskButton(QPushButton):
         return os.path.splitext(self.key)[0].title()
 
     # --- Vorschau und freies Verschieben -----------------------------------------
+    # --- [Antigravity Start] Reset & Schutz gegen hängende Klick-/Drag-Zustände (Rest: Claude Code) ---
+    def reset_state(self) -> None:
+        """Räumt hängengebliebene Maus- oder Zieh-Zustände auf, damit der nächste Linksklick sofort wieder zählt."""
+        self._dragging = False
+        self._press = None
+        self.setDown(False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+    # --- [Antigravity Ende] ---
+
     def enterEvent(self, event) -> None:
         if not self._dragging:
             self.dock.ctx.task_preview.hover(self)
@@ -380,26 +402,36 @@ class TaskButton(QPushButton):
     def mousePressEvent(self, event) -> None:
         self.dock.ctx.task_preview.dismiss()
         if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False  # [Antigravity]
             self._press = event.position().toPoint()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
         if self._press is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            # --- [Antigravity Start] Verwaistes Ziehen abfangen ---
+            if not self.dock._left_held():
+                self.reset_state()
+                self.dock.finish_drag()
+                return
+            # --- [Antigravity Ende] ---
             distance = (event.position().toPoint() - self._press).manhattanLength()
             if not self._dragging and distance >= QApplication.startDragDistance():
                 self._dragging = True
                 self.setDown(False)
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
             if self._dragging:
-                self.dock.drag_task(self, event.globalPosition().toPoint().x(), self.mapToGlobal(self._press).x())
+                # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+                if self.dock.edge in ("left", "right"):
+                    self.dock.drag_task(self, event.globalPosition().toPoint().y(), self.mapToGlobal(self._press).y())
+                else:
+                    self.dock.drag_task(self, event.globalPosition().toPoint().x(), self.mapToGlobal(self._press).x())
+                # --- [Antigravity Ende: Sidebar Support] ---
                 return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if self._dragging:
-            self._dragging = False
-            self._press = None
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.reset_state()  # [Antigravity]
             self.dock.finish_drag()
             event.accept()
             return
@@ -407,25 +439,41 @@ class TaskButton(QPushButton):
         super().mouseReleaseEvent(event)
 
     def _activate(self) -> None:
-        if not self.windows:
-            if self.target:
-                launch(self.dock.ctx, self.target)
-        elif len(self.windows) == 1:
-            hwnd = self.windows[0].hwnd
-            if win_api.foreground_window() == hwnd:
+        # --- [Antigravity Start] Nur noch existierende Fenster beachten & minimierte Vordergrundfenster aktivieren ---
+        live = [w for w in self.windows if win_api.is_window(w.hwnd)] or list(self.windows)
+        if not live:
+            target = self.target or (self.key if self.key.startswith("popwin:") else "")
+            if target:
+                launch(self.dock.ctx, target)
+        elif len(live) == 1:
+            hwnd = live[0].hwnd
+            if win_api.foreground_window() == hwnd and not win_api.is_minimized(hwnd):
                 win_api.minimize_window(hwnd)
             else:
                 win_api.activate_window(hwnd)
         else:
             menu = self._menu()
-            for window in self.windows:
+            for window in live:
                 menu.addAction(window.title[:60], lambda h=window.hwnd: win_api.activate_window(h))
             self._popup(menu)
+        # --- [Antigravity Ende] ---
 
     def _menu(self) -> QMenu:
         return themed_menu(self.dock.ctx, self, self.dock.theme_name)
 
     def _popup(self, menu: QMenu) -> None:
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if self.dock.edge == "left":
+            position = self.mapToGlobal(self.rect().topRight())
+            menu.popup(position)
+            win_api.force_foreground(int(menu.winId()))
+            return
+        if self.dock.edge == "right":
+            position = self.mapToGlobal(self.rect().topLeft()) - QPoint(menu.sizeHint().width(), 0)
+            menu.popup(position)
+            win_api.force_foreground(int(menu.winId()))
+            return
+        # --- [Antigravity Ende: Sidebar Support] ---
         if self.dock.edge == "bottom":
             position = self.mapToGlobal(self.rect().topLeft()) - QPoint(0, menu.sizeHint().height())
         else:
@@ -434,11 +482,13 @@ class TaskButton(QPushButton):
         win_api.force_foreground(int(menu.winId()))
 
     def contextMenuEvent(self, event) -> None:
+        self.dock.repair(rebuild=False)  # [Antigravity: Rechtsklick repariert hängende Taskbar sofort]
         menu = self._menu()
         pinned = self.dock.is_pinned(self.key)
-        if self.windows and self.target:
-            menu.addAction("Neues Fenster", lambda: launch(self.dock.ctx, self.target))
-        if pinned or self.target:
+        target = self.target or (self.key if self.key.startswith("popwin:") else "")
+        if self.windows and target:
+            menu.addAction("Neues Fenster", lambda: launch(self.dock.ctx, target))
+        if pinned or target:
             label = "Von Taskbar lösen" if pinned else "An Taskbar anheften"
             menu.addAction(label, lambda: self.dock.toggle_pin(self))
         if self.windows:
@@ -449,6 +499,7 @@ class TaskButton(QPushButton):
                 menu.addAction("Task beenden",
                                lambda: [win_api.terminate_process(p) for p in {w.main_pid for w in self.windows}])
         menu.addSeparator()
+        menu.addAction("Taskbar neu laden", self.dock.reload_bar)  # [Antigravity]
         menu.addAction("Taskbar-Einstellungen", lambda: self.dock.ctx.open_settings_at("Taskbar"))
         self.dock.ctx.task_preview.dismiss()
         menu.popup(event.globalPos())
@@ -476,6 +527,8 @@ class Dock(BarWindow):
         self.pad = QWidget()
         self.lead = QWidget()
         self.trail = QWidget()
+        for spacer in (self.pad, self.lead, self.trail):
+            spacer.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.lead.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.trail.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.claude = ClaudeButton(ctx) if is_dev() else None  # nur im Dev-Build, ganz links
@@ -501,6 +554,7 @@ class Dock(BarWindow):
         row.addWidget(self.trash)
         row.addWidget(self.desktop)
         self.pad_end = QWidget()  # das Gegenstück zu pad, wenn links mehr steht als rechts
+        self.pad_end.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         row.addWidget(self.pad_end)
         self.clock = ClockFace(lambda: ctx.config.monitor(self.screen_id))
         self.clock.hide()
@@ -518,6 +572,7 @@ class Dock(BarWindow):
         self._dragged: TaskButton | None = None
         self._dropping: TaskButton | None = None
         self._grab_offset = 0
+        self._slot_origin: int | None = None
         self._order_held = False  # eine andere Taskbar zieht gerade
         self._glides: dict[TaskButton, QPropertyAnimation] = {}
         self.marks = TaskMarks(self, self.root)
@@ -529,7 +584,8 @@ class Dock(BarWindow):
         self._on_config("profile")
 
     def contextMenuEvent(self, event) -> None:
-        """Rechtsklick auf die freie Fläche: das Wichtigste direkt, der Rest in den Einstellungen."""
+        """Rechtsklick auf die freie Fläche: repariert hängende Zustände sofort und zeigt das Menü."""
+        self.repair(rebuild=True)  # [Antigravity: Rechtsklick repariert die Taskbar automatisch]
         menu = themed_menu(self.ctx, self, self.theme_name)
         self.add_bar_options(menu)
         menu.popup(event.globalPos())
@@ -551,6 +607,8 @@ class Dock(BarWindow):
         toggle("Papierkorb", "show_recycle")
         toggle("Nova", "show_nova_button")
         toggle("Knopf „Desktop anzeigen“", "show_desktop")
+        if is_dev():  # [Antigravity: Claude-Knopf umschaltbar wie andere Hauptbuttons]
+            toggle("Claude-Knopf", "dev_claude_button")
         toggle("App-Namen", "task_labels")
         menu.addSeparator()
         for label, value in (("Ganze Bildschirmbreite", "full"), ("Nur so breit wie die Icons", "fit")):
@@ -559,8 +617,89 @@ class Dock(BarWindow):
             action.setChecked(self.option("dock_style") == value)
             action.triggered.connect(lambda _=False, v=value: config.set_monitor(self.screen_id, "dock_style", v))
         menu.addSeparator()
+        menu.addAction("Taskbar neu laden", self.reload_bar)  # [Antigravity]
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if sidebar.sidebar_active():
+            pos_menu = menu.addMenu("Taskbar-Position")
+            for edge_key, edge_label in sidebar.taskbar_positions().items():
+                action = pos_menu.addAction(edge_label)
+                action.setCheckable(True)
+                action.setChecked(self.edge == edge_key)
+                action.triggered.connect(lambda _=False, e=edge_key: config.set_monitor(self.screen_id, "taskbar_position", e))
+        # --- [Antigravity Ende: Sidebar Support] ---
         menu.addAction("Task-Manager öffnen", lambda: win_api.shell_open("taskmgr.exe"))
         menu.addAction("Taskbar-Einstellungen", lambda: self.ctx.open_settings_at("Taskbar"))
+
+    # --- [Antigravity Start] Taskbar-Selbstreparatur & manuelles Neu-Laden (Rest: Claude Code) ---
+    def _left_held(self) -> bool:
+        if not bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+            return False
+        if self.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen):
+            return True
+        return win_api.left_button_down()
+
+    def repair(self, rebuild: bool = True) -> None:
+        """Setzt feststeckende Maus-, Drag-, Animations- und Fokus-Zustände der Taskbar zurück."""
+        grabber = QWidget.mouseGrabber()
+        if grabber is not None and QApplication.activePopupWidget() is None:
+            grabber.releaseMouse()
+        if getattr(self.ctx, "task_preview", None) is not None:
+            self.ctx.task_preview.dismiss()
+        for animation in list(self._glides.values()):
+            animation.stop()
+        self._glides.clear()
+        self._dragged = None
+        self._dropping = None
+        self._order_held = False
+        self._slot_origin = None
+        set_prop(self.root, "dropping", False)
+        for button in list(self._buttons.values()):
+            button.reset_state()
+        for dock in self._other_docks():
+            dock._order_held = False
+            dock._slot_origin = None
+        self.setEnabled(True)
+        self.root.setEnabled(True)
+        if getattr(self, "animator", None) is not None and (self.animator.closing or self.windowOpacity() < 1.0):
+            self.animator._animation.stop()
+            self.animator._closing = False
+            self.setWindowOpacity(1.0)
+        if hasattr(self.ctx, "_windows_time"):
+            self.ctx._windows_time = 0.0
+        self._enforce_placement()
+        self._place_in_z()
+        if rebuild:
+            self._signature = None
+        elif self._buttons:
+            self._rearrange({key: None for key in self._shown_keys()})
+        self.refresh(force=rebuild)
+
+    def reload_bar(self) -> None:
+        """Lädt die Taskbar und ihre Icons komplett neu."""
+        self.repair(rebuild=True)
+        for dock in self._other_docks():
+            dock.repair(rebuild=True)
+    # --- [Antigravity Ende] ---
+
+    # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+    def _sync_orientation(self) -> None:
+        """Schaltet das Layout für die Sidebar (links/rechts) auf vertikal um."""
+        vertical = self.edge in ("left", "right")
+        row = self.root.layout()
+        direction = QBoxLayout.Direction.TopToBottom if vertical else QBoxLayout.Direction.LeftToRight
+        if row.direction() != direction:
+            row.setDirection(direction)
+        if self.apps.direction() != direction:
+            self.apps.setDirection(direction)
+        if vertical:
+            row.setContentsMargins(3, 6, 3, 6)
+            self.lead.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            self.trail.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        else:
+            row.setContentsMargins(6, 3, 6, 3)
+            self.lead.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self.trail.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+    # --- [Antigravity Ende: Sidebar Support] ---
 
     def _fit_width(self) -> None:
         if self._area and self._fits_content():
@@ -606,15 +745,20 @@ class Dock(BarWindow):
 
     def _on_config(self, key: str) -> None:
         if key == "profile" or key.startswith("taskbar"):
+            # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+            self._sync_orientation()
+            # --- [Antigravity Ende: Sidebar Support] ---
             self._arrange_tools()  # zuerst: Umhängen in ein anderes Fenster blendet ein Widget aus
-            self.media.allowed = self.option("show_media")
+            self.media.allowed = self.option("show_media") and self.edge not in ("left", "right")  # [Antigravity: Sidebar schmal halten]
             self.media.set_style(self.option("media_style"), self.option("media_width"))
             self.media.update_media(self.media._last)
+            if self.claude is not None:  # [Antigravity: Claude-Knopf sofort aktualisieren]
+                self.claude.setVisible(self.claude_on_button())
             self.trash.setVisible(self.option("show_recycle"))
             self.nova.setVisible(self.option("show_nova_button"))
             self.desktop.setVisible(self.option("show_desktop"))
             self.start.setVisible(self.option("show_start"))
-            self.search.setVisible(self.option("show_search"))
+            self.search.setVisible(self.option("show_search") and self.edge not in ("left", "right"))  # [Antigravity: Sidebar]
             self._style_start()
             self._style_search()
             self._place_clock()
@@ -730,6 +874,16 @@ class Dock(BarWindow):
         if not self._fits_content():
             super().apply_geometry()
             return
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if self.edge in ("left", "right"):
+            top, bottom, x, size = self._area
+            layout = self.root.layout()
+            layout.invalidate()
+            ratio = self.bar_screen.devicePixelRatio()
+            height = min(round(layout.sizeHint().height() * ratio), bottom - top)
+            self._place(x, aligned_x(self.option("dock_align"), top, bottom, height), size, height)
+            return
+        # --- [Antigravity Ende: Sidebar Support] ---
         left, right, y, size = self._area
         layout = self.root.layout()
         layout.invalidate()
@@ -743,6 +897,12 @@ class Dock(BarWindow):
         full = not self._fits_content()
         self.lead.setVisible(full and align != "left")
         self.trail.setVisible(full and align != "right")
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if self.edge in ("left", "right"):
+            self.pad.setVisible(False)
+            self.pad_end.setVisible(False)
+            return
+        # --- [Antigravity Ende: Sidebar Support] ---
         self.pad.setVisible(full and align == "center")
         self.pad_end.setVisible(full and align == "center")
         if align == "center":
@@ -820,7 +980,8 @@ class Dock(BarWindow):
             shared = self.ctx.config.get("taskbar.pinned")  # gemeinsame Pins dürfen auch von hier gelöst werden
             self.ctx.config.set("taskbar.pinned", [p for p in shared if pin_key(p) != button.key])
         else:
-            self._store_pins(own + [{"name": button.display_name(), "target": button.target, "exe": button.key}])
+            target = button.target or (button.key if button.key.startswith("popwin:") else "")
+            self._store_pins(own + [{"name": button.display_name(), "target": target, "exe": button.key}])
 
     # --- Feste Reihenfolge und freies Verschieben ---------------------------------
     def _shown_keys(self) -> list[str]:
@@ -828,17 +989,38 @@ class Dock(BarWindow):
 
     def _slots(self, keys: list[str]) -> dict[str, int]:
         """Wo jedes Icon bei dieser Reihenfolge steht. Das Layout selbst bleibt beim Ziehen unangetastet, es gibt nur das Maß."""
-        first = self.apps.itemAt(0).geometry()
-        second = self.apps.itemAt(1).geometry() if self.apps.count() > 1 else first
-        gap = max(0, second.x() - first.right() - 1)
-        slots, x = {}, first.x()
+        if not keys or self.apps.count() == 0:
+            return {}
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        vertical = self.edge in ("left", "right")
+        if vertical:
+            origin = self._slot_origin
+            if origin is None:
+                origin = min((self.apps.itemAt(i).geometry().y() for i in range(self.apps.count())), default=0)
+            gap = max(0, self.apps.spacing())
+            slots, pos = {}, origin
+            for key in keys:
+                if key in self._buttons:
+                    slots[key] = pos
+                    pos += self._buttons[key].height() + gap
+            return slots
+        # --- [Antigravity Ende: Sidebar Support] ---
+        """Wo jedes Icon bei dieser Reihenfolge steht. Das Layout selbst bleibt beim Ziehen unangetastet, es gibt nur das Maß."""
+        if not keys or self.apps.count() == 0:
+            return {}
+        origin = self._slot_origin
+        if origin is None:
+            origin = min((self.apps.itemAt(i).geometry().x() for i in range(self.apps.count())), default=0)
+        gap = max(0, self.apps.spacing())
+        slots, x = {}, origin
         for key in keys:
-            slots[key] = x
-            x += self._buttons[key].width() + gap
+            if key in self._buttons:
+                slots[key] = x
+                x += self._buttons[key].width() + gap
         return slots
 
     def _glide(self, button: TaskButton, x: int) -> None:
-        if button.x() == x and button not in self._glides:
+        if (button.y() if self.edge in ("left", "right") else button.x()) == x and button not in self._glides:  # [Antigravity: Sidebar Support]
             return
         animation = self._glides.get(button)
         if animation is None:
@@ -849,7 +1031,7 @@ class Dock(BarWindow):
         duration = GLIDE_MS if self.ctx.config.get("animations.enabled") else 0
         animation.setDuration(duration)
         animation.setStartValue(button.pos())
-        animation.setEndValue(QPoint(x, button.y()))
+        animation.setEndValue(QPoint(button.x(), x) if self.edge in ("left", "right") else QPoint(x, button.y()))  # [Antigravity: Sidebar Support]
         animation.start()
 
     def _glide_done(self, button: TaskButton) -> None:
@@ -862,6 +1044,8 @@ class Dock(BarWindow):
 
     def preview_order(self, keys: list[str]) -> None:
         """Eine andere Taskbar zieht gerade: Hier wandern die Icons live mit."""
+        if self._slot_origin is None and self.apps.count() > 0:
+            self._slot_origin = min((self.apps.itemAt(i).geometry().x() for i in range(self.apps.count())), default=0)
         self._order_held = True
         mine = [key for key in keys if key in self._buttons]
         mine += [key for key in self._shown_keys() if key not in mine]
@@ -870,10 +1054,43 @@ class Dock(BarWindow):
             self._glide(self._buttons[key], x)
 
     def drag_task(self, button: TaskButton, global_x: int, grabbed_x: int | None = None) -> None:
-        if not QApplication.mouseButtons() & Qt.MouseButton.LeftButton and self._dragged is button:
+        if not self._left_held() and self._dragged is button:
             self.finish_drag()  # das Loslassen kam nicht an, etwa weil ein Fenster dazwischenging
             return
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        if self.edge in ("left", "right"):
+            if self._dragged is not button:
+                self._slot_origin = min((self.apps.itemAt(i).geometry().y() for i in range(self.apps.count())), default=0)
+                self._dragged = button
+                self._dropping = None
+                self._grab_offset = (global_x if grabbed_x is None else grabbed_x) - button.mapToGlobal(QPoint(0, 0)).y()
+                animation = self._glides.pop(button, None)
+                if animation:
+                    animation.stop()
+                button.raise_()
+            keys = self._shown_keys()
+            slots = self._slots(keys)
+            if not slots:
+                return
+            low, high = min(slots.values()), max(slots.values())
+            y_pos = max(low, min(high, button.parentWidget().mapFromGlobal(QPoint(0, global_x)).y() - self._grab_offset))
+            button.move(button.x(), y_pos)
+            others = [key for key in keys if key != button.key]
+            centers = [slots[key] + self._buttons[key].height() / 2 for key in keys if key != button.key]
+            index = 0 if y_pos <= low else len(others) if y_pos >= high else sum(y_pos + button.height() / 2 > center for center in centers)
+            order = moved_key(keys, button.key, min(index, len(others)))
+            if order != keys:
+                self._order = order + [k for k in self._order if k not in order]
+                for key, target in self._slots(order).items():
+                    if key != button.key:
+                        self._glide(self._buttons[key], target)
+                if self._synced():
+                    for dock in self._other_docks():
+                        dock.preview_order(order)
+            return
+        # --- [Antigravity Ende: Sidebar Support] ---
         if self._dragged is not button:
+            self._slot_origin = min((self.apps.itemAt(i).geometry().x() for i in range(self.apps.count())), default=0)
             self._dragged = button
             self._dropping = None
             self._grab_offset = (global_x if grabbed_x is None else grabbed_x) - button.mapToGlobal(QPoint(0, 0)).x()
@@ -883,6 +1100,8 @@ class Dock(BarWindow):
             button.raise_()
         keys = self._shown_keys()
         slots = self._slots(keys)
+        if not slots:
+            return
         low, high = min(slots.values()), max(slots.values())
         x = max(low, min(high, button.parentWidget().mapFromGlobal(QPoint(global_x, 0)).x() - self._grab_offset))
         button.move(x, button.y())  # das Icon bleibt in der Hand: Es folgt der Maus ohne Umweg über das Layout
@@ -903,19 +1122,25 @@ class Dock(BarWindow):
         button = self._dragged
         if button is None:
             return
+        button.reset_state()
         self._dragged = None
         self._dropping = button
-        self._glide(button, self._slots(self._shown_keys())[button.key])
+        slots = self._slots(self._shown_keys())
+        if button.key in slots:
+            self._glide(button, slots[button.key])
         if button not in self._glides:  # es stand schon genau auf seinem Platz
             self._commit_drop()
 
     def _commit_drop(self) -> None:
         self._dropping = None
+        self._slot_origin = None
         self.save_order()
+        self.apps.activate()
         self.refresh()
         if self._synced():
             for dock in self._other_docks():
                 dock._order_held = False
+                dock._slot_origin = None
                 dock.refresh()
 
     def save_order(self) -> None:
@@ -943,9 +1168,26 @@ class Dock(BarWindow):
 
     def refresh(self, force: bool = False) -> None:
         # Beim Ziehen darf nichts neu gebaut werden: Der Knopf in der Hand würde gelöscht und das Icon fiele heraus.
+        held = self._left_held()
+        if not held:
+            for button in self._buttons.values():
+                if button._dragging or button._press is not None or button.isDown():
+                    button.reset_state()
         if self._dragged is not None or self._dropping is not None or self._order_held:
-            if self._dragged is not None and not QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
-                self.finish_drag()
+            if not held:
+                if self._dragged is not None:
+                    self.finish_drag()
+                if self._dropping is not None and self._dropping not in self._glides:
+                    self._commit_drop()
+                if self._order_held and not any(d._dragged is not None or d._dropping is not None for d in self._other_docks()):
+                    self._order_held = False
+                    self._slot_origin = None
+                    if self._buttons:
+                        self._rearrange({key: None for key in self._shown_keys()})
+            if self._dragged is not None or self._dropping is not None or self._order_held:
+                return
+        # Während ein Knopf gedrückt gehalten wird, nicht neu aufbauen, sonst geht das Loslassen (clicked) verloren.
+        if not force and held and any(b._press is not None or b.isDown() for b in self._buttons.values()):
             return
         pins = self.visible_pins()
         groups: dict[str, dict] = {pin_key(p): {"target": p["target"], "name": p["name"], "windows": [], "pinned": True} for p in pins}
@@ -983,7 +1225,7 @@ class Dock(BarWindow):
             button.target = group["target"]
             button.name = group["name"]
             label = button.fontMetrics().elidedText(button.display_name(), Qt.TextElideMode.ElideRight, button.LABEL_WIDTH)
-            button.setText(label if self.task_labels else "")
+            button.setText(label if (self.task_labels and self.edge not in ("left", "right")) else "")  # [Antigravity: Sidebar]
             titles = [w.title for w in group["windows"]]
             set_prop(button, "running", bool(titles))
             # Bei mehreren Fenstern einer App reicht ein nicht minimiertes.
@@ -1004,6 +1246,9 @@ class Dock(BarWindow):
         self.apps.activate()
 
     def _rebuild(self, groups: dict) -> None:
+        for animation in list(self._glides.values()):
+            animation.stop()
+        self._glides.clear()
         for button in self._buttons.values():
             self.apps.removeWidget(button)
             button.hide()

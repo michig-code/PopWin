@@ -628,9 +628,17 @@ class SettingsWindow(NativeWindow):
 
         self._dock_tools_group(layout, selected)
         if is_dev():
-            dev_check, _combo, _spin = group("Dev · Claude-Knopf")
-            dev_check("dev_claude_button", "Claude-Knopf ganz links, Claude nicht als Task")
+
+
+            # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+            dev_form = self._option_group(layout, selected, "Dev · Claude-Knopf")
+            dev_check, _combo, _spin = self._monitor_controls(dev_form, selected.key)
+            dev_check("dev_claude_button", "Claude-Knopf neben dem Home-Knopf")
+            # --- [Antigravity Ende: Sidebar Support] ---
+
         check, combo, spin = group("Elemente")
+        if is_dev():  # [Antigravity: Claude-Knopf umschaltbar wie andere Elemente]
+            check("dev_claude_button", "Claude-Knopf anzeigen")
         check("show_start", "Home-Knopf anzeigen")
         combo("start_style", "Symbol des Home-Knopfs", {
             "home": "Haus", "windows": "Windows-Logo", "logo": "PopWin-Logo"})
@@ -654,7 +662,11 @@ class SettingsWindow(NativeWindow):
         check("task_labels", "App-Namen neben den Icons")
         check("task_counts", "Anzahl offener Fenster am Icon")
 
-        check, combo, spin = group("Größe und Verhalten")
+        check, combo, spin = group("Position, Größe und Verhalten")
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        from ui import sidebar
+        combo("taskbar_position", "Taskbar-Position", sidebar.taskbar_positions())
+        # --- [Antigravity Ende: Sidebar Support] ---
         combo("dock_style", "Breite", {"full": "Ganze Bildschirmbreite", "fit": "Nur so breit wie die Icons"})
         combo("dock_align", "Ausrichtung", {"left": "Links", "center": "Mitte", "right": "Rechts"})
         spin("dock_height", "Höhe", 0, 96, "Wie im UI-Stil")
@@ -754,7 +766,10 @@ class SettingsWindow(NativeWindow):
         positions = {"top": "Oben", "bottom": "Unten"}
         combo("theme", "UI-Stil", {"": "Wie globaler Stil", **PRESETS})
         combo("topbar_position", "Topbar-Position", positions)
-        combo("taskbar_position", "Taskbar-Position", positions)
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        from ui import sidebar
+        combo("taskbar_position", "Taskbar-Position", sidebar.taskbar_positions())
+        # --- [Antigravity Ende: Sidebar Support] ---
         if key is not None:
             copy = QPushButton("Auf alle Monitore übertragen", objectName="Secondary")
             copy.clicked.connect(lambda: self._copy_to_all(key))
