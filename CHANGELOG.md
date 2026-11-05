@@ -1,4 +1,4 @@
-# Änderungen
+﻿# Änderungen
 
 ## 3.8.4
 
@@ -7,6 +7,13 @@
 - **Nova-Artefakte Fehlerbehebung:** Verhindert das optische Glitchen und Überlappen des „Neues Artefakt“-Buttons mit dem Zurück-Button und dem Titel beim Wechsel in die Artefakt-Detailansicht.
 - **Notiz-Widget frei vergrößerbar:** Das Notizzettel-Widget lässt sich über den Eckgriff unten rechts stufenlos nach rechts und nach unten vergrößern und verkleinern, wobei sich das Textfeld dynamisch mit anpasst.
 - **Messwert- & Netz-Tempo-Widgets frei skalierbar & sauberes Layout:** Behebt das automatische Anwachsen der Widgets beim Ziehen am Eckgriff; Download- und Upload-Raten sind beim Netz-Tempo nun übersichtlich zusammen unten unter dem freien Verlauf platziert.
+
+## 3.8.3
+
+- **Neuer Hintergrund „Null“:** ein riesiger kalter Mond hinter dreidimensionalen Stacheln, ein weicher Schein, Filmkorn und leichte Farbsäume. „Scherben“ bleibt, wie er ist.
+- **Taskbar-Stabilität & Neu laden per Rechtsklick:** verhindert hängende Maus-, Drag- und Fokus-Zustände auf der Taskbar, holt minimierte Fenster zuverlässig zurück in den Vordergrund und setzt die Leiste bei Rechtsklick sowie über „Taskbar neu laden“ sofort zurück.
+- **Sidebar-Unterstützung (links/rechts):** ermöglicht im Dev-Build das Platzieren der Taskbar als vertikale Seitenleiste am linken oder rechten Bildschirmrand inkl. AppBar-Reservierung, Rand-Erkennung und vertikalem Drag & Drop.
+- **Such-Ranking nach Nutzungshäufigkeit & Claude-Knopf umschaltbar:** oft genutzte Apps mit Suchbegriff im Namen (z. B. „Minecraft Launcher“) werden vor weniger genutzten exakten Treffern priorisiert; der Claude-Knopf kann in Taskbar-Kontextmenü und Einstellungen wie die anderen Hauptbuttons ein- und ausgeschaltet werden.
 
 ## 3.8.2
 
