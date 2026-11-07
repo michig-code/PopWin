@@ -8,11 +8,11 @@ from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from config.config_manager import MONITOR_DEFAULTS
-from core import hardware, i18n, wallpapers, win_api
+from core import hardware, i18n, wallpapers, win_api, nova_brain  # [Antigravity]
 from core.ai_actions import settings_catalog
 from core.gemini_client import PlanWorker
 from core.monitor_manager import native_rect, screen_key
@@ -20,7 +20,7 @@ from core.nova_controller import NOVA_KEY
 from core.nova_voice import VOICES
 from core.paths import DATA_DIR, app_shortcut
 from core.replacements import REPLACEMENTS
-from core.theme_manager import NOVA_CLASSICS, PRESETS, THEME_DIR
+from core.theme_manager import NOVA_CLASSICS, PRESETS, THEME_DIR, TILE_MODES, TILE_SHAPES
 from extensions import USER_FOLDER
 from ui import desktop_groups
 from ui.audio_mixer import AudioMixer
@@ -358,6 +358,18 @@ class SettingsWindow(NativeWindow):
         theme.setCurrentIndex(theme.findData(self.ctx.theme.current))
         theme.currentIndexChanged.connect(lambda _i: self.ctx.theme.set_theme(theme.currentData()))
         form.addRow("UI-Stil", theme)
+        tiles = QComboBox()
+        for value, label in TILE_MODES.items():
+            tiles.addItem(label, value)
+        tiles.setCurrentIndex(tiles.findData(self.ctx.theme.tile_mode))
+        tiles.currentIndexChanged.connect(lambda _i: self.ctx.theme.set_tile_mode(tiles.currentData()))
+        form.addRow("Kacheln um die Icons", tiles)
+        shape = QComboBox()
+        for value, label in TILE_SHAPES.items():
+            shape.addItem(label, value)
+        shape.setCurrentIndex(shape.findData(self.ctx.theme.tile_shape))
+        shape.currentIndexChanged.connect(lambda _i: self.ctx.theme.set_tile_shape(shape.currentData()))
+        form.addRow("Form der Kacheln", shape)
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Dunkel", "dark")
         self.mode_combo.addItem("Hell", "light")
@@ -631,11 +643,9 @@ class SettingsWindow(NativeWindow):
 
 
             # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
-            dev_form = self._option_group(layout, selected, "Dev · Claude-Knopf & Sidebar")
-            dev_check, dev_combo, _spin = self._monitor_controls(dev_form, selected.key)
+            dev_form = self._option_group(layout, selected, "Dev · Claude-Knopf")
+            dev_check, _combo, _spin = self._monitor_controls(dev_form, selected.key)
             dev_check("dev_claude_button", "Claude-Knopf neben dem Home-Knopf")
-            from ui import sidebar
-            dev_combo("taskbar_position", "Taskbar-Position (inkl. Sidebar)", sidebar.taskbar_positions())
             # --- [Antigravity Ende: Sidebar Support] ---
 
         check, combo, spin = group("Elemente")
@@ -664,7 +674,11 @@ class SettingsWindow(NativeWindow):
         check("task_labels", "App-Namen neben den Icons")
         check("task_counts", "Anzahl offener Fenster am Icon")
 
-        check, combo, spin = group("Größe und Verhalten")
+        check, combo, spin = group("Position, Größe und Verhalten")
+        # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
+        from ui import sidebar
+        combo("taskbar_position", "Taskbar-Position", sidebar.taskbar_positions())
+        # --- [Antigravity Ende: Sidebar Support] ---
         combo("dock_style", "Breite", {"full": "Ganze Bildschirmbreite", "fit": "Nur so breit wie die Icons"})
         combo("dock_align", "Ausrichtung", {"left": "Links", "center": "Mitte", "right": "Rechts"})
         spin("dock_height", "Höhe", 0, 96, "Wie im UI-Stil")
@@ -1188,6 +1202,29 @@ class SettingsWindow(NativeWindow):
         form = page.group("Was Nova darf")
         form.addRow(self._check("nova.allow_screen", "Den Bildschirm ansehen"))
         form.addRow(self._check("nova.allow_input", "Maus und Tastatur benutzen, nach deiner Erlaubnis"))
+        # --- [Antigravity Start: Novas Persönlichkeit anpassen und zurücksetzen (Rest: Claude Code)] ---
+        form = page.group("Persönlichkeit & Charakter")
+        self.nova_persona_edit = QPlainTextEdit()
+        self.nova_persona_edit.setPlainText(nova_brain.load_persona())
+        self.nova_persona_edit.setFixedHeight(130)
+        self.nova_persona_edit.setPlaceholderText("Beschreibe Novas Persönlichkeit, Charakter und Verhalten …")
+        form.addRow(self.nova_persona_edit)
+
+        btn_row = QHBoxLayout()
+        save_persona_btn = QPushButton("Persönlichkeit speichern", objectName="Primary")
+        save_persona_btn.clicked.connect(self._save_nova_persona)
+        reset_persona_btn = QPushButton("Auf Standard zurücksetzen", objectName="Secondary")
+        reset_persona_btn.clicked.connect(self._reset_nova_persona)
+        btn_row.addWidget(save_persona_btn)
+        btn_row.addWidget(reset_persona_btn)
+        btn_row.addStretch(1)
+        form.addRow(btn_row)
+
+        self.nova_persona_status = QLabel(objectName="Muted")
+        form.addRow(self.nova_persona_status)
+        page.note("Hier kannst du festlegen, wie Nova sich verhält, spricht und reagiert. Ein Klick auf "
+                  "„Auf Standard zurücksetzen“ stellt den Originalzustand wieder her.")
+        # --- [Antigravity Ende] ---
         form = page.group("Stimme")
         form.addRow(self._check("nova.speak", "Nova antwortet mit Stimme"))
         form.addRow("Wie", self._combo("nova.speak_engine", {
@@ -1255,6 +1292,22 @@ class SettingsWindow(NativeWindow):
     def _refresh_nova(self) -> None:
         saved = bool(self.ctx.config.api_key(NOVA_KEY))
         self.nova_key_status.setText("Ein eigener Key ist gespeichert." if saved else "Noch kein eigener Key gespeichert.")
+        # --- [Antigravity Start: Status der Persönlichkeit aktualisieren] ---
+        if hasattr(self, "nova_persona_status"):
+            is_custom = nova_brain.is_custom_persona()
+            self.nova_persona_status.setText("Individuelle Persönlichkeit aktiv." if is_custom else "Standard-Persönlichkeit aktiv.")
+        # --- [Antigravity Ende] ---
+
+    # --- [Antigravity Start: Persönlichkeit speichern / zurücksetzen] ---
+    def _save_nova_persona(self) -> None:
+        nova_brain.save_custom_persona(self.nova_persona_edit.toPlainText())
+        self._refresh_nova()
+
+    def _reset_nova_persona(self) -> None:
+        nova_brain.reset_persona()
+        self.nova_persona_edit.setPlainText(nova_brain.default_persona())
+        self._refresh_nova()
+    # --- [Antigravity Ende] ---
 
     def _save_nova_key(self) -> None:
         self.ctx.config.set_api_key(self.nova_key.text().strip(), NOVA_KEY)

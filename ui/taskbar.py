@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPainter, QPainterPath, QPixmap, QRegion
 from PySide6.QtWidgets import (
     QApplication, QBoxLayout, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QVBoxLayout, QWidget,  # [Antigravity]
 )
@@ -712,9 +712,70 @@ class Dock(BarWindow):
     def on_meta_changed(self, meta: dict) -> None:
         self.media.set_compact(meta["compact"] == "1")
         self.media.update_media(self.media._last)
-        win_api.set_rounded(int(self.winId()), meta["rounded"] == "1" or self._fits_content())
+        self._apply_native_backdrop()
+        self._round_corners()
+        self.update()
+
+    def _apply_native_backdrop(self) -> None:
+        """Einzige Stelle, die Blur und Windows-Ecken der Taskbar setzt.
+        Den Blur malt Windows immer als Rechteck (höchstens 8 px rund), die runde Maske ignoriert er.
+        Bei den runderen Stilen kommt der Hintergrund deshalb von PopWin selbst, siehe paintEvent."""
+        hwnd = int(self.winId())
+        if self.paints_backdrop():
+            win_api.set_blur(hwnd, "none")
+            win_api.set_rounded(hwnd, False)
+        else:
+            meta = self.meta()
+            win_api.set_blur(hwnd, meta["blur"], self.ctx.theme.tint(self.theme_name))
+            win_api.set_rounded(hwnd, meta["rounded"] == "1" or self._fits_content())
         self._style_search()
         self.refresh(force=True)
+
+    def corner_radius(self) -> int:
+        """Windows rundet Fenster höchstens um 8 px. Die Kachel-Stile wollen rundere Ecken (Meta „corner“),
+        „Komplett rund“ macht die Leiste zur Pille. Alle anderen Stile behalten die Ecken von Windows."""
+        radius = int(self.meta().get("corner") or 0)
+        if radius and self.ctx.theme.tile_shape == "round":
+            radius = self.height()
+        return min(radius, self.height() // 2, self.width() // 2)
+
+    def paints_backdrop(self) -> bool:
+        """Stile mit runderen Ecken als 8 px bekommen ihren Hintergrund von PopWin statt vom Windows-Blur."""
+        return int(self.meta().get("corner") or 0) > 8
+
+    def backdrop_color(self) -> QColor:
+        """Die Tönung des Stils, deckender als beim Blur, damit die Leiste ohne Weichzeichner lesbar bleibt."""
+        value = self.ctx.theme.tint(self.theme_name).lstrip("#").ljust(8, "F")
+        color = QColor(f"#{value[:6]}")
+        color.setAlpha(max(int(value[6:8], 16), 0xE0))
+        return color
+
+    def _round_corners(self) -> None:
+        """Schneidet das Fenster rund zu; außerhalb gehen Klicks an Windows durch.
+        Die Maske ist 1 px größer als die gemalte Form, damit deren weiche Kante nicht abgeschnitten wird."""
+        radius = self.corner_radius()
+        if radius <= 8:
+            if not self.mask().isEmpty():
+                self.clearMask()
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()).adjusted(-1, -1, 1, 1), radius + 1, radius + 1)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def paintEvent(self, event) -> None:
+        radius = self.corner_radius()
+        if radius <= 8 or not self.paints_backdrop():
+            return super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.backdrop_color())
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+        painter.end()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._round_corners()
 
     def _style_start(self) -> None:
         style = self.option("start_style")
@@ -767,7 +828,7 @@ class Dock(BarWindow):
             self.task_labels = self.option("task_labels")
             self.apps.setSpacing(self.option("icon_spacing"))
             set_prop(self.root, "popFit", self._fits_content())
-            win_api.set_rounded(int(self.winId()), self.meta()["rounded"] == "1" or self._fits_content())
+            self._apply_native_backdrop()
             self.refresh(force=True)
             self.reposition()
             if self._registered:

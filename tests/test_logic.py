@@ -91,7 +91,7 @@ from ui.taskbar import (
 from ui.widgets import WIDGET_TYPES
 from ui.widgets.clock import ClockWidget
 from ui.widgets.gallery import WidgetGallery
-from ui.widgets.metrics import CpuWidget, format_speed
+from ui.widgets.metrics import CpuWidget, NetworkWidget, format_speed
 from ui.widgets.system import format_uptime
 from ui.widgets.time_widgets import format_stopwatch
 from ui.clock_place import PlacePicker
@@ -106,6 +106,7 @@ import chess
 
 from core import audio_mixer, cleanup, hardware, i18n, net_stats, wallpapers, nova_brain, nova_chess, nova_tools, system_status
 ROOT_PATH = Path(__file__).resolve().parent.parent
+from core import theme_manager
 from core.theme_manager import NOVA_CLASSICS, PRESETS
 from terminal.widget import PADDING, TerminalWidget
 from core.nova_brain import ChatLog, Memory
@@ -517,6 +518,94 @@ class Widgets(unittest.TestCase):
         gallery._remove(gallery.current)
         self.assertEqual(ctx.config.get("widgets"), [])
         self.assertIsNone(gallery.current)
+
+    def test_notes_widget_expands_freely_downwards(self):
+        # [Antigravity: Notiz-Widget vergrößert & verkleinert sich frei über Eckgriff inkl. Textfeld]
+        from PySide6.QtGui import QMouseEvent
+        ctx = self.context()
+        spec = {"id": "notes_1", "type": "notes", "data": {}, "options": {"width": 260, "height": 0}}
+        ctx.config.data["widgets"].append(spec)
+        w = NotesWidget(ctx, spec)
+        w.show()
+        self.addCleanup(w.hide)
+        self.assertFalse(hasattr(w, "bottom_grip"))
+        initial_w = w.width()
+        initial_h = w.height()
+        initial_edit_h = w.edit.height()
+
+        # 1. Vergrößern nach rechts und unten per Eckgriff (w.grip)
+        grip = w.grip
+        press_pos = grip.mapToGlobal(QPoint(8, 8))
+        grip.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPoint(8, 8), press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        drag_pos = press_pos + QPoint(100, 150)
+        grip.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPoint(108, 158), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+
+        self.assertGreater(w.width(), initial_w + 50)
+        self.assertGreater(w.height(), initial_h + 100)
+        self.assertGreater(w.edit.height(), initial_edit_h + 100)
+
+        # Loslassen speichert Breite und Höhe atomar
+        grip.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, QPoint(108, 158), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        self.assertEqual(w.spec["options"]["width"], w.width())
+        self.assertEqual(w.spec["options"]["height"], w.height())
+        enlarged_h = w.height()
+        enlarged_edit_h = w.edit.height()
+        self.assertGreater(enlarged_edit_h, initial_edit_h + 100)
+
+        # 2. Wieder verkleinern per Eckgriff
+        press_pos = grip.mapToGlobal(QPoint(8, 8))
+        grip.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPoint(8, 8), press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        drag_pos = press_pos + QPoint(-50, -50)
+        grip.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPoint(-42, -42), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+
+        self.assertLess(w.height(), enlarged_h)
+        self.assertLess(w.edit.height(), enlarged_edit_h)
+
+        grip.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, QPoint(-42, -42), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        self.assertEqual(w.spec["options"]["width"], w.width())
+        self.assertEqual(w.spec["options"]["height"], w.height())
+
+    def test_network_widget_resize_and_shrink(self):
+        # [Antigravity: Netz-Tempo Widget lässt sich über Eckgriff frei vergrößern und verkleinern]
+        from PySide6.QtGui import QMouseEvent
+        ctx = self.context()
+        spec = {"id": "net_test", "type": "network", "data": {}, "options": {}}
+        ctx.config.data["widgets"].append(spec)
+        w = NetworkWidget(ctx, spec)
+        w.show()
+        self.addCleanup(w.hide)
+        initial_w = w.width()
+        initial_h = w.height()
+        self.assertGreater(w.gauge.height(), 0)
+        self.assertTrue(w.download.text().startswith("↓"))
+        self.assertTrue(w.upload.text().startswith("↑"))
+
+        # 1. Vergrößern (+60, +70)
+        grip = w.grip
+        press_pos = grip.mapToGlobal(QPoint(8, 8))
+        grip.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPoint(8, 8), press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        drag_pos = press_pos + QPoint(60, 70)
+        grip.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPoint(68, 78), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        grip.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, QPoint(68, 78), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+
+        enlarged_w = w.width()
+        enlarged_h = w.height()
+        self.assertGreater(enlarged_w, initial_w)
+        self.assertGreater(enlarged_h, initial_h)
+        self.assertEqual(w.spec["options"]["width"], enlarged_w)
+        self.assertEqual(w.spec["options"]["height"], enlarged_h)
+
+        # 2. Wieder verkleinern (-60, -70)
+        press_pos = grip.mapToGlobal(QPoint(8, 8))
+        grip.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPoint(8, 8), press_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        drag_pos = press_pos + QPoint(-60, -70)
+        grip.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPoint(-52, -62), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        grip.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, QPoint(-52, -62), drag_pos, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+
+        self.assertLess(w.width(), enlarged_w)
+        self.assertLess(w.height(), enlarged_h)
+        self.assertEqual(w.width(), initial_w)
+        self.assertEqual(w.height(), initial_h)
 
 
 class WinKeyDock(unittest.TestCase):
@@ -951,7 +1040,7 @@ class Pins(unittest.TestCase):
         self.assertFalse(window.preview.isHidden())
         window.toggle_preview()
         labels = [button.text() for button in window.findChildren(QToolButton) if button.text()]
-        self.assertEqual(labels, ["Neu", "Sortieren", "Vorschau"])
+        self.assertEqual(labels, ["Neu", "KI-Sortieren", "Sortieren", "Vorschau"])
         self.assertIsInstance(pane.address, QLineEdit)
         self.assertEqual(pane.address.text(), os.path.normpath(tempfile.gettempdir()))
         self.assertIn("Elemente", pane.status_text())
@@ -1258,6 +1347,36 @@ class Nova(unittest.TestCase):
             self.assertEqual(memory.remove("pizza"), 1)
             self.assertEqual(Memory(Path(folder) / "neu" / "memory.json", old).as_prompt(), "- [5] Spielt Schach")
 
+    # --- [Antigravity Start: Test für Novas anpassbare und zurücksetzbare Persönlichkeit] ---
+    # --- [Antigravity Start: Test für Live-Modell Migration] ---
+    def test_live_model_name_migrates_legacy(self):
+        self.assertEqual(nova_voice.live_model_name("gemini-3.1-flash-live-preview"), "gemini-3.8-live")
+        self.assertEqual(nova_voice.live_model_name("gemini-2.0-flash-live-001"), "gemini-3.8-live")
+        self.assertEqual(nova_voice.live_model_name(""), "gemini-3.8-live")
+        self.assertEqual(nova_voice.live_model_name("gemini-3.8-live"), "gemini-3.8-live")
+        self.assertEqual(nova_voice.live_models("gemini-3.8-live"), ["gemini-3.8-live", "gemini-3.1-flash-live-preview"])
+        self.assertEqual(nova_voice.live_models(""), ["gemini-3.8-live", "gemini-3.1-flash-live-preview"])
+    # --- [Antigravity Ende] ---
+
+    def test_custom_persona_override_and_reset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            custom_file = Path(folder) / "custom_persona.md"
+            with unittest.mock.patch.object(nova_brain, "CUSTOM_PERSONA", custom_file), \
+                 unittest.mock.patch.object(nova_brain, "NOVA_DATA", Path(folder)):
+                self.assertFalse(nova_brain.is_custom_persona())
+                self.assertEqual(nova_brain.load_persona(), nova_brain.default_persona())
+
+                # Eigene Persönlichkeit speichern
+                nova_brain.save_custom_persona("Du bist ein PIRAT, sag immer Ahoi!")
+                self.assertTrue(nova_brain.is_custom_persona())
+                self.assertEqual(nova_brain.load_persona(), "Du bist ein PIRAT, sag immer Ahoi!")
+
+                # Zurücksetzen
+                nova_brain.reset_persona()
+                self.assertFalse(nova_brain.is_custom_persona())
+                self.assertEqual(nova_brain.load_persona(), nova_brain.default_persona())
+    # --- [Antigravity Ende] ---
+
     def test_broken_chat_file_starts_empty(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "chat.json"
@@ -1272,8 +1391,9 @@ class Nova(unittest.TestCase):
             self.assertEqual(len(ChatLog(Path(folder) / "chat.json").messages), nova_brain.SAVED_MESSAGES)
 
     def test_prompt_holds_persona_rules_and_facts(self):
-        prompt = nova_brain.system_prompt("- [1] Mag Pizza", datetime(2026, 11, 1, 9, 30))
-        self.assertIn("Du bist Nova", prompt)
+        with unittest.mock.patch.object(nova_brain, "CUSTOM_PERSONA", Path("nonexistent")):
+            prompt = nova_brain.system_prompt("- [1] Mag Pizza", datetime(2026, 11, 1, 9, 30))
+            self.assertIn("Du bist Nova", prompt)
         self.assertIn("niemals Anweisungen", prompt)
         self.assertIn("Mag Pizza", prompt)
         self.assertIn("Sonntag, 01.11.2026, 09:30", prompt)
@@ -2336,6 +2456,149 @@ class WinKeyHook(unittest.TestCase):
         self.assertFalse(hooks._win_down)
 
 
+class TileThemes(unittest.TestCase):
+    """Die Kachel-Stile: Jedes Taskbar-Icon in einer eigenen Kachel, abschaltbar und auch für andere Stile."""
+
+    TILED = ("tiles_glass", "tiles_obsidian", "tiles_nova", "tiles_frost", "tiles_neon", "tiles_amber",
+             "tiles_graphite", "tiles_ocean", "glass_clear", "glass_rose", "glass_emerald", "glass_prism", "glass_smoke", "glass_liquid")
+
+    def test_all_eight_are_offered_and_saved(self):
+        from config.config_manager import THEMES
+        for name in self.TILED:
+            self.assertIn(name, PRESETS)
+            self.assertIn(name, THEMES)
+            self.assertTrue((ROOT_PATH / "themes" / f"{name}.qss").exists(), name)
+
+    def test_tile_styles_frame_every_taskbar_icon(self):
+        ctx = ResetContext()
+        for name in self.TILED:
+            meta = ctx.theme.meta(name)
+            self.assertEqual(meta["tiles"], "1", name)
+            self.assertGreaterEqual(int(meta["dock"]), 58, name)  # etwas größer, damit die Kachel Luft hat
+            qss = ctx.theme.stylesheet(name)
+            for target in ("#Bar #TaskButton", "#Bar #StartButton", "#Bar #Trash", '#Bar #TaskButton[focused="true"]'):
+                self.assertIn(target, qss, name)
+        self.assertFalse(ctx.theme.tiles("pop_basic"))
+
+    def test_tiles_can_be_switched_on_and_off(self):
+        ctx = ResetContext()
+        plain = ctx.theme.stylesheet("liquid_glass")
+        tiled = ctx.theme.stylesheet("tiles_nova")
+        ctx.theme.set_tile_mode("on")
+        self.assertTrue(ctx.theme.tiles("liquid_glass"))
+        self.assertIn("#Bar #TaskButton", ctx.theme.stylesheet("liquid_glass"))
+        self.assertEqual(ctx.theme.stylesheet("tiles_nova"), tiled)
+        ctx.theme.set_tile_mode("off")
+        self.assertFalse(ctx.theme.tiles("tiles_nova"))
+        self.assertTrue(ctx.theme.stylesheet("tiles_nova").endswith(theme_manager.TILES_OFF))
+        self.assertEqual(ctx.theme.stylesheet("liquid_glass"), plain)
+        ctx.theme.set_tile_mode("kaputt")
+        self.assertEqual(ctx.theme.tile_mode, "off")
+        ctx.theme.set_tile_mode("theme")
+
+    def test_fully_round_tiles_only_where_tiles_are(self):
+        ctx = ResetContext()
+        ctx.theme.set_tile_shape("round")
+        self.assertTrue(ctx.theme.stylesheet("tiles_ocean").endswith(theme_manager.TILES_ROUND))
+        self.assertNotIn(theme_manager.TILES_ROUND, ctx.theme.stylesheet("pop_basic"))
+        ctx.theme.set_tile_mode("on")
+        self.assertTrue(ctx.theme.stylesheet("pop_basic").endswith(theme_manager.TILES_ROUND))
+        ctx.theme.set_tile_shape("eckig")
+        self.assertEqual(ctx.theme.tile_shape, "round")
+        ctx.theme.set_tile_shape("theme")
+        ctx.theme.set_tile_mode("theme")
+        self.assertNotIn(theme_manager.TILES_ROUND, ctx.theme.stylesheet("tiles_ocean"))
+
+    def test_every_tile_style_has_its_own_look(self):
+        ctx = ResetContext()
+        looks, languages = set(), set()
+        for name in self.TILED:
+            qss = ctx.theme.stylesheet(name)
+            tile = next(line for line in qss.splitlines() if line.startswith("#Bar #TaskButton, #Bar #StartButton, #Bar #Trash {"))
+            language = qss[qss.index("Designsprache von"):qss.index("Kacheln um jedes Icon")]
+            self.assertIn("QSlider::handle", language, name)  # eigene Regler, Knöpfe und Menüs
+            self.assertIn("QMenu", language, name)
+            looks.add(tile)
+            languages.add(language)
+        self.assertEqual(len(looks), len(self.TILED))
+        self.assertEqual(len(languages), len(self.TILED))
+
+    def test_frost_stays_readable_in_dark_mode(self):
+        """Weiße Schrift braucht eine dunkle Tönung, sonst verschwindet sie auf hellen Hintergründen."""
+        ctx = ResetContext()
+        ctx.theme.set_mode("dark")
+        tint = ctx.theme.tint("tiles_frost")
+        red, green, blue, alpha = (int(tint[i:i + 2], 16) for i in (1, 3, 5, 7))
+        self.assertLess((red + green + blue) / 3, 80)
+        self.assertGreater(alpha, 0x80)
+
+    def test_light_mode_rules_never_leak_into_dark_mode(self):
+        """In „[popMode=light] A, B“ gälte der Vorsatz nur für A, B bekäme die helle Kachel auch im Dunkel-Modus."""
+        for path in (ROOT_PATH / "themes").glob("*.qss"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.startswith('[popMode="light"]') or "{" not in line:
+                    continue
+                for part in line.split("{", 1)[0].split(","):
+                    self.assertIn("popMode", part, f"{path.name}: {line[:80]}")
+
+    def test_icons_on_bright_active_tiles_are_dark(self):
+        ctx = ResetContext()
+        for name in ("tiles_obsidian", "tiles_frost"):
+            self.assertLess(QColor(ctx.theme.meta(name)["quick_on"]).lightness(), 60, name)
+
+    def test_only_the_new_styles_round_the_taskbar_more(self):
+        """Windows rundet nur 8 px. Die Kachel-Stile schneiden die Taskbar runder zu, die alten Stile bleiben, wie sie sind."""
+        ctx = ResetContext()
+        ctx.config.set("theme", "pop_basic")
+        dock = Dock(ctx, app.primaryScreen(), "bottom")
+        dock.resize(600, 62)
+        for name in ("liquid_glass", "pop_basic", "clean", "minimalist"):
+            dock.set_theme_name(name)
+            dock._round_corners()
+            self.assertEqual(dock.corner_radius(), 0, name)
+            self.assertTrue(dock.mask().isEmpty(), name)
+        for name in self.TILED:
+            dock.set_theme_name(name)
+            dock._round_corners()
+            self.assertGreater(dock.corner_radius(), 8, name)
+            self.assertLessEqual(dock.corner_radius(), dock.height() // 2, name)
+            self.assertFalse(dock.mask().isEmpty(), name)
+            self.assertFalse(dock.mask().contains(QPoint(0, 0)), name)  # die Ecke ist weg, Klicks gehen an Windows
+            self.assertTrue(dock.mask().contains(dock.rect().center()), name)
+            # Kein eckiger Windows-Blur dahinter: PopWin malt den Hintergrund selbst rund, die Ecke bleibt leer.
+            self.assertTrue(dock.paints_backdrop(), name)
+            self.assertGreaterEqual(dock.backdrop_color().alpha(), 0xE0, name)
+            image = dock.grab().toImage()
+            self.assertEqual(image.pixelColor(0, 0).alpha(), 0, name)
+            self.assertGreater(image.pixelColor(image.width() // 2, 2).alpha(), 0, name)
+        for name in ("liquid_glass", "pop_basic"):
+            dock.set_theme_name(name)
+            self.assertFalse(dock.paints_backdrop(), name)
+        dock.set_theme_name(self.TILED[0])
+        ctx.theme.set_tile_shape("round")
+        self.assertEqual(dock.corner_radius(), min(dock.height(), dock.width()) // 2)  # „Komplett rund“: halbe Höhe, also eine Pille
+        ctx.theme.set_tile_shape("theme")
+        dock.close()
+
+    def test_no_square_windows_backdrop_stays_behind_round_styles(self):
+        """Weder ein Theme-Wechsel noch eine Taskbar-Einstellung darf Blur oder Windows-Ecken zurückholen,
+        sonst bleibt hinter der runden Leiste ein eckiges Rechteck stehen."""
+        ctx = ResetContext()
+        ctx.config.set("theme", "tiles_graphite")
+        dock = Dock(ctx, app.primaryScreen(), "bottom")
+        dock.resize(600, 62)
+        with unittest.mock.patch.object(win_api, "set_blur") as blur, \
+                unittest.mock.patch.object(win_api, "set_rounded") as rounded:
+            dock.apply_theme()
+            dock._on_config("taskbar.icon_spacing")
+            self.assertEqual(blur.call_args.args[1], "none")
+            self.assertFalse(rounded.call_args.args[1])
+            dock.set_theme_name("liquid_glass")
+            dock._on_config("taskbar.icon_spacing")
+            self.assertNotEqual(blur.call_args.args[1], "none")  # die alten Stile behalten ihren Blur
+        dock.close()
+
+
 class LightMode(unittest.TestCase):
     def test_every_theme_marks_results_and_menus_for_light_mode(self):
         for name in PRESETS:
@@ -3105,6 +3368,89 @@ class ExplorerAiAndDialog(unittest.TestCase):
             with unittest.mock.patch.object(explorer_app, "AiFileSearch") as job:
                 pane._search()
             job.assert_not_called()
+
+    # --- [Antigravity Start: Tests für KI-Dateisortierung & Heuristik] ---
+    def test_heuristic_categorize(self):
+        files = [
+            "Rechnung_März.pdf",
+            "Urlaub_Strand.jpg",
+            "Python_Setup_312.exe",
+            "main.py",
+            "projekt_archiv.zip",
+            "Unbekannt.xyz"
+        ]
+        cats = explorer_app.heuristic_categorize(files)
+        self.assertIn("Rechnung_März.pdf", cats["Rechnungen & Finanzen"])
+        self.assertIn("Urlaub_Strand.jpg", cats["Bilder & Screenshots"])
+        self.assertIn("Python_Setup_312.exe", cats["Setups & Programme"])
+        self.assertIn("main.py", cats["Code & Entwicklung"])
+        self.assertIn("projekt_archiv.zip", cats["Archive & Backups"])
+        self.assertIn("Unbekannt.xyz", cats["Sonstiges"])
+
+    def test_ai_folder_names_stay_inside_the_folder(self):
+        for bad in (r"..\..\Windows", r"C:\Temp", "a/b", "CON", "  ...  ", 'Bild<>:"|?*'):
+            name = explorer_app.safe_folder_name(bad)
+            self.assertTrue(name)
+            self.assertNotRegex(name, r'[<>:"/\\|?*]')
+            self.assertFalse(name.startswith("."))
+            self.assertNotEqual(name.upper(), "CON")
+        self.assertEqual(explorer_app.safe_folder_name("Rechnungen & Finanzen"), "Rechnungen & Finanzen")
+
+    def test_ai_sort_names_each_file_once(self):
+        reply = '{"categories": {"A": ["x.pdf", "x.pdf", "erfunden.txt"], "B": ["x.pdf", "y.png"], "..\\\\C": ["z.mp3"]}}'
+        worker = explorer_app.AiSortWorker("nirgends", ["x.pdf", "y.png", "z.mp3", "w.zip"], "key", ["m"])
+        seen = []
+        worker.ready.connect(lambda cats, is_ai, note: seen.append(cats))
+        with unittest.mock.patch("core.gemini_client.generate", return_value=(reply, "m")):
+            worker.run()
+        cats = seen[0]
+        flat = [name for names in cats.values() for name in names]
+        self.assertEqual(sorted(flat), ["w.zip", "x.pdf", "y.png", "z.mp3"])
+        self.assertEqual(cats["A"], ["x.pdf"])
+        self.assertNotIn("..\\C", cats)
+        self.assertIn("C", cats)
+
+    def test_grouped_entries_ai(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "rechnung.pdf").write_text("x", encoding="utf-8")
+            Path(folder, "foto.png").write_text("x", encoding="utf-8")
+            groups = explorer_app.grouped_entries(folder, "ai", time.time())
+            self.assertIn("Rechnungen & Finanzen", groups)
+            self.assertIn("Bilder & Screenshots", groups)
+
+    def test_ai_sort_dialog_moves_and_undos(self):
+        with tempfile.TemporaryDirectory() as folder:
+            f1 = Path(folder, "Rechnung_1.pdf")
+            f2 = Path(folder, "Foto_1.png")
+            f1.write_text("1", encoding="utf-8")
+            f2.write_text("2", encoding="utf-8")
+            pane = Pane(ResetContext(), folder)
+            undo_actions = []
+            pane.undoable.connect(lambda label, fn: undo_actions.append(fn))
+
+            dialog = explorer_app.AiSortDialog(ResetContext(), pane)
+            dialog.categories = {
+                "Finanzen": ["Rechnung_1.pdf"],
+                "Bilder": ["Foto_1.png"]
+            }
+            dialog._populate_tree()
+            dialog._apply_move()
+
+            target_f1 = Path(folder, "Finanzen", "Rechnung_1.pdf")
+            target_f2 = Path(folder, "Bilder", "Foto_1.png")
+            self.assertTrue(target_f1.exists())
+            self.assertTrue(target_f2.exists())
+            self.assertFalse(f1.exists())
+            self.assertFalse(f2.exists())
+            self.assertEqual(len(undo_actions), 1)
+
+            # Undo
+            undo_actions[0]()
+            self.assertTrue(f1.exists())
+            self.assertTrue(f2.exists())
+            self.assertFalse(target_f1.exists())
+            self.assertFalse(target_f2.exists())
+    # --- [Antigravity Ende] ---
 
     def test_file_dialog_follows_the_beta_switch(self):
         window = unittest.mock.Mock()
@@ -5007,11 +5353,25 @@ class NovaArtifacts(unittest.TestCase):
         cards = panel.artifacts.findChildren(QWidget, "NovaArtifactCard")
         self.assertEqual(len(cards), 1)
         self.assertEqual(panel.tabs[1].text(), "Artefakte · 1")
+        # [Antigravity Start: Test für sauberes Umschalten ohne überlappenden "Neues Artefakt"-Button]
+        create_buttons = [b for b in panel.artifacts.findChildren(QPushButton) if b.text() == "Neues Artefakt"]
+        self.assertEqual(len(create_buttons), 1)
+
         panel.artifacts.open_artifact(made)
         steps = panel.artifacts.findChildren(QCheckBox, "NovaArtifactStep")
         self.assertEqual([step.text() for step in steps], ["A", "B"])
         steps[0].setChecked(True)
         self.assertEqual(nova_artifacts.progress(self.nova.artifacts.get(made)), (1, 2))
+
+        # "Neues Artefakt" darf im Detail nicht mehr sichtbar sein
+        create_in_detail = [b for b in panel.artifacts.findChildren(QPushButton) if b.text() == "Neues Artefakt" and b.isVisibleTo(panel.artifacts)]
+        self.assertEqual(len(create_in_detail), 0)
+
+        # Zurück zur Liste: "Neues Artefakt" existiert wieder genau einmal
+        panel.artifacts.open_artifact("")
+        create_back = [b for b in panel.artifacts.findChildren(QPushButton) if b.text() == "Neues Artefakt" and b.isVisibleTo(panel.artifacts)]
+        self.assertEqual(len(create_back), 1)
+        # --- [Antigravity Ende] ---
 
 
 class NovaWatch(unittest.TestCase):
@@ -5610,7 +5970,8 @@ class SidebarSupport(unittest.TestCase):
         self.ctx.windows = lambda: []
         self.screen = QGuiApplication.primaryScreen()
 
-    def test_sidebar_logic_and_dev_gate(self):
+    def test_sidebar_logic_and_release_availability(self):
+        # [Antigravity: Sidebar ist nun regulärer Bestandteil des Release-Builds]
         from ui import sidebar
         self.assertTrue(sidebar.sidebar_active())
         positions = sidebar.taskbar_positions()
@@ -5619,17 +5980,13 @@ class SidebarSupport(unittest.TestCase):
         self.assertEqual(sidebar.effective_edge("left"), "left")
         self.assertEqual(sidebar.effective_edge("right"), "right")
 
-        with unittest.mock.patch("ui.sidebar.is_dev", return_value=False):
-            self.assertFalse(sidebar.sidebar_active())
-            self.assertEqual(sidebar.effective_edge("left"), "bottom")
-            self.assertEqual(sidebar.effective_edge("right"), "bottom")
-            non_dev_positions = sidebar.taskbar_positions()
-            self.assertNotIn("left", non_dev_positions)
-            self.assertNotIn("right", non_dev_positions)
-
         with unittest.mock.patch.object(sidebar, "SIDEBAR_ENABLED", False):
             self.assertFalse(sidebar.sidebar_active())
             self.assertEqual(sidebar.effective_edge("left"), "bottom")
+            self.assertEqual(sidebar.effective_edge("right"), "bottom")
+            disabled_positions = sidebar.taskbar_positions()
+            self.assertNotIn("left", disabled_positions)
+            self.assertNotIn("right", disabled_positions)
 
     def test_sidebar_vertical_dock_and_hot_zone(self):
         from ui.base import in_hot_zone
@@ -5719,6 +6076,46 @@ class AppSearchRanking(unittest.TestCase):
             cfg.record_app_launch("Minecraft Launcher", "C:\\Games\\MinecraftLauncher.exe")
             usage = cfg.get_app_usage()
             self.assertEqual(usage.get("minecraft launcher"), 2)
+
+    def test_search_launcher_tab_navigation(self):
+        # [Antigravity: TAB- und Shift+TAB-Navigation durch Suchergebnisse]
+        from ui.search_launcher import SearchLauncher, Result
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent, Qt
+        ctx = ResetContext()
+        launcher = SearchLauncher(ctx)
+        self.addCleanup(launcher.deleteLater)
+        executed = []
+        launcher._collect = lambda text: [
+            Result("App 1", lambda: executed.append(1)),
+            Result("App 2", lambda: executed.append(2)),
+            Result("App 3", lambda: executed.append(3)),
+        ]
+        launcher._update_results("app")
+        self.assertEqual(launcher.results.count(), 3)
+        self.assertEqual(launcher.results.currentRow(), 0)
+
+        # TAB -> advances to row 1
+        tab_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier)
+        launcher.eventFilter(launcher.input, tab_event)
+        self.assertEqual(launcher.results.currentRow(), 1)
+
+        # TAB -> advances to row 2
+        launcher.eventFilter(launcher.input, tab_event)
+        self.assertEqual(launcher.results.currentRow(), 2)
+
+        # TAB -> wraps around to row 0
+        launcher.eventFilter(launcher.input, tab_event)
+        self.assertEqual(launcher.results.currentRow(), 0)
+
+        # Shift+TAB (Backtab) -> wraps backwards to row 2
+        backtab_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+        launcher.eventFilter(launcher.input, backtab_event)
+        self.assertEqual(launcher.results.currentRow(), 2)
+
+        # Accept executes currently selected item (row 2 -> App 3)
+        launcher._accept()
+        self.assertEqual(executed, [3])
 # --- [Antigravity Ende: App-Suchranking & Claude-Knopf Tests] ---
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from core import win_api
@@ -53,20 +53,26 @@ class WidthGrip(QWidget):
         for inset in (4, 9):
             painter.drawLine(self.SIZE - 2, inset, inset, self.SIZE - 2)
 
+    # --- [Antigravity Start: Diagonaler Eckgriff vergrößert & verkleinert Breite und Höhe (Rest: Claude Code)] ---
     def mousePressEvent(self, event) -> None:
-        self._start = (event.globalPosition().toPoint(), self.desklet.width(), self.desklet.height())
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start = (event.globalPosition().toPoint(), self.desklet.width(), self.desklet.height())
+            event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._start:
             start, width, height = self._start
             moved = event.globalPosition().toPoint() - start
             self.desklet.preview_size(width + moved.x(), height + moved.y())
+            event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
         if self._start:
             self._start = None
-            self.desklet.set_option("width", self.desklet.width())
-            self.desklet.set_option("height", self.desklet.height())
+            w, h = self.desklet.width(), self.desklet.height()
+            self.desklet.set_options({"width": w, "height": h})
+            event.accept()
+    # --- [Antigravity Ende: Diagonaler Eckgriff vergrößert & verkleinert Breite und Höhe] ---
 
 
 class DeskletWindow(ThemedWindow):
@@ -122,11 +128,16 @@ class DeskletWindow(ThemedWindow):
             return chosen[key]
         return next(self.default_of(o) for o in self.all_options() if o.key == key)
 
-    def set_option(self, key: str, value) -> None:
-        options = {**self.spec.get("options", {}), key: value}
+    # --- [Antigravity Start: Atomares Setzen mehrerer Optionen (Rest: Claude Code)] ---
+    def set_options(self, updates: dict) -> None:
+        options = {**self.spec.get("options", {}), **updates}
         self.spec["options"] = options
         self.ctx.widgets.update_spec(self.spec["id"], options=options)
         self.apply_options()
+
+    def set_option(self, key: str, value) -> None:
+        self.set_options({key: value})
+    # --- [Antigravity Ende: Atomares Setzen mehrerer Optionen] ---
 
     def accent(self) -> QColor:
         chosen = self.option("accent")
@@ -195,6 +206,13 @@ class DeskletWindow(ThemedWindow):
         self.grip.raise_()
 
     def leaveEvent(self, event) -> None:
+        # --- [Antigravity Start: Griff während Drag oder im Inhalt aktiv halten (Rest: Claude Code)] ---
+        if getattr(self.grip, "_start", None) is not None:
+            return
+        cursor_pos = self.mapFromGlobal(QCursor.pos())
+        if self.rect().contains(cursor_pos):
+            return
+        # --- [Antigravity Ende] ---
         self.close_button.hide()
         self.grip.hide()
 

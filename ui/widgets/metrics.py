@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from collections import deque
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 from ui.base import G
 from ui.widgets.base import DeskletWindow, Option
@@ -25,13 +25,26 @@ def format_speed(bytes_per_second: float) -> str:
 class Gauge(QWidget):
     """Zeichnet einen Wert von 0 bis 100 im gewählten Stil."""
 
-    def __init__(self, owner: DeskletWindow):
+    # --- [Antigravity Start: Gauge dynamisch an Fenstergröße anpassen (Rest: Claude Code)] ---
+    MIN_GAUGE_HEIGHT = 30
+
+    def __init__(self, owner: DeskletWindow, default_height: int = 80, show_text: bool = True):
         super().__init__()
         self.owner = owner
+        self.default_height = default_height
+        self.show_text = show_text
         self.value: float | None = None
         self.text = "–"
         self.history: deque[float] = deque(maxlen=60)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(self.MIN_GAUGE_HEIGHT)
+
+    def sizeHint(self) -> QSize:
+        return QSize(self.owner.DEFAULT_WIDTH, self.default_height)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(40, self.MIN_GAUGE_HEIGHT)
+    # --- [Antigravity Ende] ---
 
     def set_value(self, value: float | None, text: str | None = None) -> None:
         self.value = value
@@ -67,13 +80,14 @@ class Gauge(QWidget):
             painter.drawRoundedRect(QRectF(0, track.y(), track.width() * value / 100, 8), 4, 4)
         elif style == "graph":
             self._draw_graph(painter, area, accent)
-        font = QFont(painter.font())
-        font.setPixelSize(int(self.owner.option("value_size")))
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(text_color)
-        target = area.adjusted(0, 0, 0, -14) if style == "bar" else area
-        painter.drawText(target, Qt.AlignmentFlag.AlignCenter, self.text)
+        if self.show_text:
+            font = QFont(painter.font())
+            font.setPixelSize(int(self.owner.option("value_size")))
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(text_color)
+            target = area.adjusted(0, 0, 0, -14) if style == "bar" else area
+            painter.drawText(target, Qt.AlignmentFlag.AlignCenter, self.text)
         painter.end()
 
     def _draw_graph(self, painter: QPainter, area: QRectF, accent: QColor) -> None:
@@ -101,21 +115,22 @@ class Gauge(QWidget):
 class MetricWidget(DeskletWindow):
     STATE_KEY = ""
     DEFAULT_WIDTH = 180
+    DEFAULT_GAUGE_HEIGHT = 110  # [Antigravity]
+    # [Antigravity: 'height' gehört als gemeinsame Option dem Fenster (wie bei NotesWidget)]
     OPTIONS = (
         Option("style", "Darstellung", "choice", "ring", choices=STYLES),
-        Option("height", "Höhe der Anzeige", "int", 110, 50, 260),
         Option("value_size", "Schriftgröße des Werts", "int", 20, 10, 48),
     )
 
     def build(self) -> None:
         self.add_title()
-        self.gauge = Gauge(self)
-        self.body.addWidget(self.gauge)
+        self.gauge = Gauge(self, self.DEFAULT_GAUGE_HEIGHT)
+        self.body.addWidget(self.gauge, 1)  # [Antigravity: stretch=1 füllt den Raum]
         self.ctx.status.updated.connect(self.update_status)
         self.update_status(self.ctx.status.state)
 
     def options_changed(self) -> None:
-        self.gauge.setFixedHeight(self.option("height"))
+        pass  # [Antigravity: Höhe wird über Fenster-Option 'height' und Layout geregelt]
 
     def update_status(self, state: dict) -> None:
         self.gauge.set_value(state.get(self.STATE_KEY))
@@ -154,29 +169,47 @@ class NetworkWidget(DeskletWindow):
     GLYPH = G.NETWORK
     DESCRIPTION = "Download und Upload live"
     DEFAULT_WIDTH = 220
+    DEFAULT_GAUGE_HEIGHT = 70  # [Antigravity]
+    # [Antigravity: 'height' gehört als gemeinsame Option dem Fenster (wie bei NotesWidget)]
     OPTIONS = (
         Option("style", "Darstellung", "choice", "graph", choices={"graph": "Verlauf", "number": "Nur Zahl"}),
-        Option("height", "Höhe der Anzeige", "int", 70, 40, 200),
         Option("value_size", "Schriftgröße des Werts", "int", 12, 9, 28),
         Option("show_upload", "Upload anzeigen", "bool", True),
     )
 
+    # --- [Antigravity Start: Download- & Upload-Anzeige sauber unten platziert (Rest: Claude Code)] ---
     def build(self) -> None:
         self.add_title()
-        self.gauge = Gauge(self)
+        self.gauge = Gauge(self, self.DEFAULT_GAUGE_HEIGHT, show_text=False)
+        self.download = QLabel()
         self.upload = QLabel(objectName="Muted")
-        self.body.addWidget(self.gauge)
-        self.body.addWidget(self.upload)
+        self.body.addWidget(self.gauge, 1)
+
+        rates_row = QHBoxLayout()
+        rates_row.setContentsMargins(0, 0, 0, 0)
+        rates_row.setSpacing(12)
+        rates_row.addWidget(self.download)
+        rates_row.addWidget(self.upload)
+        rates_row.addStretch(1)
+        self.body.addLayout(rates_row)
+
         self._peak = 1024.0
         self.ctx.status.updated.connect(self.update_status)
         self.update_status(self.ctx.status.state)
 
     def options_changed(self) -> None:
-        self.gauge.setFixedHeight(self.option("height"))
+        is_graph = self.option("style") == "graph"
+        self.gauge.setVisible(is_graph)
         self.upload.setVisible(self.option("show_upload"))
+        font_size = self.option("value_size")
+        self.download.setStyleSheet(f"font-size: {font_size}px; font-weight: bold;")
+        self.upload.setStyleSheet(f"font-size: {font_size}px;")
 
     def update_status(self, state: dict) -> None:
-        down = state["net_down"]
+        down = state.get("net_down", 0.0)
+        up = state.get("net_up", 0.0)
         self._peak = max(self._peak * 0.98, down, 1024.0)  # Skala folgt langsam dem Spitzenwert
-        self.gauge.set_value(down / self._peak * 100, f"↓ {format_speed(down)}")
-        self.upload.setText(f"↑ {format_speed(state['net_up'])}")
+        self.gauge.set_value(down / self._peak * 100, "")
+        self.download.setText(f"↓ {format_speed(down)}")
+        self.upload.setText(f"↑ {format_speed(up)}")
+    # --- [Antigravity Ende: Download- & Upload-Anzeige sauber unten platziert] ---

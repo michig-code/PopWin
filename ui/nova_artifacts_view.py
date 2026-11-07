@@ -191,6 +191,8 @@ class ArtifactDetail(QWidget):
         box.setContentsMargins(0, 0, 8, 0)
         box.setSpacing(8)
         head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
         back = IconButton(BACK_GLYPH, "Zurück")
         back.clicked.connect(self.back)
         head.addWidget(back)
@@ -540,12 +542,22 @@ class ArtifactsView(QWidget):
                 self.nova.artifacts.save(artifact)
         self.rebuild()
 
+    # --- [Antigravity Start: Rekursives Layout- & Widget-Aufräumen gegen Glitches (Rest: Claude Code)] ---
     def _clear(self) -> None:
+        def _delete_item(item) -> None:
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+            l = item.layout()
+            if l is not None:
+                while l.count():
+                    _delete_item(l.takeAt(0))
+                l.deleteLater()
+
         while self.rows.count():
-            item = self.rows.takeAt(0)
-            if item.widget():
-                item.widget().hide()
-                item.widget().deleteLater()
+            _delete_item(self.rows.takeAt(0))
+    # --- [Antigravity Ende] ---
 
     def edit(self, artifact_id: str = "") -> None:
         """Leer heißt: ein neues Artefakt."""
@@ -573,12 +585,14 @@ class ArtifactsView(QWidget):
             self.rows.addWidget(detail)
             return
         self.current = ""
-        head = QHBoxLayout()
+        head_widget = QWidget()  # [Antigravity: Wrapper-Widget verhindert verwaiste Buttons beim Umschalten]
+        head = QHBoxLayout(head_widget)
+        head.setContentsMargins(0, 0, 0, 0)
         create = QPushButton("Neues Artefakt", objectName="Primary")
         create.clicked.connect(lambda: self.edit(""))
         head.addWidget(create)
         head.addStretch(1)
-        self.rows.addLayout(head)
+        self.rows.addWidget(head_widget)
         if not items:
             empty = plain_label("Noch keine Artefakte. Leg selbst eins an oder gib Nova eine längere Aufgabe, "
                                 "dann legt sie hier ihre Checkliste an.", "Muted")

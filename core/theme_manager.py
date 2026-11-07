@@ -20,7 +20,38 @@ PRESETS = {
     "pop_basic": "Pop!_OS Basic",
     "clean": "Clean",
     "minimalist": "Minimalistisch",
+    # Kachel-Stile: Jedes Icon der Taskbar sitzt in einer eigenen dunklen Kachel.
+    "tiles_glass": "Dunkles Glas",
+    "tiles_obsidian": "Obsidian",
+    "tiles_nova": "Nova Galaxie",
+    "tiles_frost": "Frostglas",
+    "tiles_neon": "Neon-Kontur",
+    "tiles_amber": "Bernstein",
+    "tiles_graphite": "Graphit rund",
+    "tiles_ocean": "Ozean",
+    # Glas-Familie im Stil von Liquid Glass, jede mit eigenem Glas-Effekt
+    "glass_clear": "Klarglas",
+    "glass_rose": "Rosé-Glas",
+    "glass_emerald": "Smaragd-Glas",
+    "glass_prism": "Prisma-Glas",
+    "glass_smoke": "Rauchglas",
+    "glass_liquid": "Flüssigglas",
 }
+TILE_MODES = {"theme": "Wie im UI-Stil", "on": "An", "off": "Aus"}
+TILE_SHAPES = {"theme": "Wie im UI-Stil", "round": "Komplett rund"}
+# Qt rundet nur bis zur halben Höhe; mehr, und die Ecke bleibt eckig. Darum je Knopfart ein eigener Radius.
+TILES_ROUND = """
+#Bar { border-radius: 31px; }
+#Bar #TaskButton, #Bar #TaskButton:hover, #Bar #TaskButton:pressed, #Bar #TaskButton[focused="true"] { border-radius: 18px; }
+#Bar #StartButton, #Bar #Trash, #Bar #StartButton:hover, #Bar #Trash:hover, #Bar #StartButton:pressed, #Bar #Trash:pressed { border-radius: 15px; }
+#Panel, #Desklet { border-radius: 18px; }
+#MediaBox { border-radius: 16px; }
+"""
+TILES_OFF = """
+#Bar #TaskButton, #Bar #StartButton, #Bar #Trash { background: transparent; border: none; margin: 0; }
+#Bar #TaskButton:hover, #Bar #StartButton:hover, #Bar #Trash:hover { background: rgba(128, 128, 128, 0.22); }
+#Bar #TaskButton[focused="true"] { background: rgba(128, 128, 128, 0.3); border: none; }
+"""
 NOVA_CLASSICS = {  # Novas Farben aus der Zeit als eigenes Programm
     "nacht": {"bg": "#05060d", "solid": "#0d0e1d", "field": "rgba(255, 255, 255, 0.045)", "line": "rgba(190, 200, 255, 0.12)",
               "fg": "#eceef7", "muted": "#8d93ab", "accent": "#8b6cff", "b1": "#5b3cff", "b2": "#00b7ff", "b3": "#ff3fa4"},
@@ -37,7 +68,7 @@ NOVA_CLASSICS = {  # Novas Farben aus der Zeit als eigenes Programm
 }
 META_DEFAULTS = {
     "blur": "none", "tint": "#00000000", "tint_light": "", "bar": "34", "dock": "52",
-    "margin": "0", "rounded": "0", "compact": "0", "quick_on": "#FFFFFF",
+    "margin": "0", "rounded": "0", "compact": "0", "quick_on": "#FFFFFF", "tiles": "0", "corner": "0",
     "ind": "#FFFFFF", "ind_active": "#FFFFFF", "ind_light": "#202020", "ind_active_light": "#000000",
 }
 _META_RE = re.compile(r"/\*\s*popwin:(.*?)\*/", re.S)
@@ -63,7 +94,7 @@ class ThemeManager(QObject):
 
     def _watch(self) -> None:
         # Editoren ersetzen Dateien beim Speichern - danach muss neu überwacht werden.
-        files = [str(THEME_DIR / f"{name}.qss") for name in (*PRESETS, "_base")]
+        files = [str(THEME_DIR / f"{name}.qss") for name in (*PRESETS, "_base", "_tiles")]
         missing = [f for f in files if f not in self._watcher.files()]
         if missing:
             self._watcher.addPaths(missing)
@@ -85,6 +116,31 @@ class ThemeManager(QObject):
         if name in PRESETS and name != self.current:
             self.config.set("theme", name, notify=False)
             self.changed.emit()
+
+    @property
+    def tile_mode(self) -> str:
+        mode = self.config.get("icon_tiles")
+        return mode if mode in TILE_MODES else "theme"
+
+    def set_tile_mode(self, mode: str) -> None:
+        if mode in TILE_MODES and mode != self.tile_mode:
+            self.config.set("icon_tiles", mode, notify=False)
+            self.changed.emit()
+
+    @property
+    def tile_shape(self) -> str:
+        shape = self.config.get("tile_shape")
+        return shape if shape in TILE_SHAPES else "theme"
+
+    def set_tile_shape(self, shape: str) -> None:
+        if shape in TILE_SHAPES and shape != self.tile_shape:
+            self.config.set("tile_shape", shape, notify=False)
+            self.changed.emit()
+
+    def tiles(self, name: str = "") -> bool:
+        """Sitzen die Icons der Taskbar in Kacheln? Der UI-Stil entscheidet, außer man stellt es fest ein."""
+        mode = self.tile_mode
+        return self.meta(name)["tiles"] == "1" if mode == "theme" else mode == "on"
 
     def set_mode(self, mode: str) -> None:
         if mode != self.mode:
@@ -109,7 +165,25 @@ class ThemeManager(QObject):
         return self._cache[name]
 
     def stylesheet(self, name: str = "") -> str:
-        return self._load(name or self.current)[0]
+        qss, meta = self._load(name or self.current)
+        own = meta["tiles"] == "1"
+        wanted = self.tiles(name)
+        if wanted and not own:
+            qss = qss + "\n" + self._tiles_qss()
+        elif own and not wanted:
+            qss = qss + TILES_OFF
+        if wanted and self.tile_shape == "round":
+            qss = qss + TILES_ROUND
+        return qss
+
+    def _tiles_qss(self) -> str:
+        if "_tiles" not in self._cache:
+            try:
+                self._cache["_tiles"] = ((THEME_DIR / "_tiles.qss").read_text(encoding="utf-8"), {})
+            except OSError as exc:
+                log.error("Kacheln nicht lesbar: %s", exc)
+                self._cache["_tiles"] = ("", {})
+        return self._cache["_tiles"][0]
 
     def meta(self, name: str = "") -> dict:
         return self._load(name or self.current)[1]

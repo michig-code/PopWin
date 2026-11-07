@@ -1,0 +1,11 @@
+/* Icon-Kacheln für UI-Stile ohne eigene Kacheln (Einstellung „Kacheln um die Icons: An“). */
+/* Kacheln um jedes Icon der Taskbar: liegen innerhalb der Leiste und verdecken nichts. */
+#Bar #TaskButton, #Bar #StartButton, #Bar #Trash { background: rgba(10, 12, 18, 0.72); border: 1px solid rgba(255, 255, 255, 0.22); border-radius: 11px; padding: 5px; margin: 1px 2px; }
+#Bar #StartButton, #Bar #Trash { padding: 5px 8px; }
+#Bar #TaskButton:hover, #Bar #StartButton:hover, #Bar #Trash:hover { background: rgba(40, 44, 56, 0.85); }
+#Bar #TaskButton:pressed, #Bar #StartButton:pressed, #Bar #Trash:pressed { background: rgba(40, 44, 56, 0.85); border-color: rgba(255, 255, 255, 0.75); }
+#Bar #TaskButton[focused="true"] { background: rgba(40, 44, 56, 0.85); border: 2px solid rgba(255, 255, 255, 0.75); padding: 4px; }
+#Bar #Trash[dropping="true"] { border: 2px solid rgba(255, 255, 255, 0.75); }
+[popMode="light"] #Bar #TaskButton, [popMode="light"] #Bar #StartButton, [popMode="light"] #Bar #Trash { background: rgba(255, 255, 255, 0.55); border-color: rgba(0, 0, 0, 0.14); }
+[popMode="light"] #Bar #TaskButton:hover, [popMode="light"] #Bar #StartButton:hover, [popMode="light"] #Bar #Trash:hover { background: rgba(255, 255, 255, 0.8); }
+[popMode="light"] #Bar #TaskButton[focused="true"] { background: rgba(255, 255, 255, 0.85); border-color: #0078B8; }

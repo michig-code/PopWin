@@ -210,10 +210,23 @@ class SearchLauncher(ThemedWindow):
             if key == Qt.Key.Key_Escape:
                 self.dismiss()
                 return True
-            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up) and self.results.count():
-                step = 1 if key == Qt.Key.Key_Down else -1
-                self.results.setCurrentRow((self.results.currentRow() + step) % self.results.count())
+            # --- [Antigravity Start: TAB- & Pfeiltasten-Navigation durch Suchergebnisse (Rest: Claude Code)] ---
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                if self.results.count():
+                    is_backward = (
+                        key == Qt.Key.Key_Up
+                        or key == Qt.Key.Key_Backtab
+                        or (key == Qt.Key.Key_Tab and bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+                    )
+                    step = -1 if is_backward else 1
+                    current = self.results.currentRow()
+                    if current < 0:
+                        current = 0 if step == 1 else self.results.count() - 1
+                    else:
+                        current = (current + step) % self.results.count()
+                    self.results.setCurrentRow(current)
                 return True
+            # --- [Antigravity Ende: TAB- & Pfeiltasten-Navigation] ---
         return super().eventFilter(watched, event)
 
     # --- Ergebnisse ---------------------------------------------------------

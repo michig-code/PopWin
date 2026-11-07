@@ -1,4 +1,23 @@
-# Änderungen
+﻿# Änderungen
+
+## 3.8.5
+
+- Explorer: KI-gestützte Dateisortierung mit interaktiver Vorschau, Ordner-Verschiebung (mit Strg+Z Rückgängig) und virtueller Themen-Gruppierung
+- Nova: Anpassbare KI-Persönlichkeit (System-Prompt) in den Einstellungen mit Zurücksetzen-Funktion
+- Nova: Zuverlässiges Weiterreden bei langen Persönlichkeiten und Folgefragen durch Gemini-3.8-Live-Upgrade und automatischen Sprach-Fallback
+- Explorer KI-Sortieren: Ordnernamen der KI werden bereinigt (keine Pfade wie „..\“, keine verbotenen Zeichen), jede Datei nur einmal, gesperrte Dateien brechen die Sortierung nicht mehr ab, Rückgängig überschreibt nie neue Dateien, Ansicht-Gruppen gelten nur für ihren Ordner.
+- Nova-Stimme: Antwortet „gemini-3.8-live“ nicht, verbindet Nova automatisch mit dem bewährten „gemini-3.1-flash-live-preview“.
+- 8 neue UI-Stile, jeder mit eigener Designsprache und Kachel-Effekt: Dunkles Glas (Liquid Glass), Obsidian (Neubrutalismus), Nova Galaxie (Aurora), Frostglas (weiches Milchglas), Neon-Kontur (Cyberpunk), Bernstein (Skeuomorph, Messing), Graphit rund (Neumorphismus), Ozean (fließende Wellenform). Neue Einstellungen „Kacheln um die Icons“ und „Form der Kacheln“ (Komplett rund) unter Design. Frostglas bleibt im Dunkel-Modus auch auf hellen Hintergründen lesbar.
+- Kachel-Stile: Taskbar mit runderen Ecken als die 8 px von Windows (Fenster samt Blur wird rund zugeschnitten), nur bei den neuen Stilen.
+- Glas-Familie im Stil von Liquid Glass: Klarglas, Rosé-Glas, Smaragd-Glas, Prisma-Glas (Regenbogen-Kante), Rauchglas und Flüssigglas (Apple-ähnliche Lichtkante, gewölbte Kacheln mit hellem Kern). Kachel-Stile überarbeitet: nur Neon-Kontur hat noch eine volle Umrandung.
+
+## 3.8.4
+
+- **Suchleisten-Navigation per TAB:** Mit TAB und Shift+TAB (sowie den Pfeiltasten) kann nach einer Suche direkt durch die angezeigten Treffer navigiert werden.
+- **Taskbar als Seitenleiste (links/rechts):** Die Taskleiste kann nun flexibel am linken oder rechten Bildschirmrand als vertikale Seitenleiste platziert werden (inkl. automatischer Layout-Anpassung und Bildschirmplatz-Reservierung).
+- **Nova-Artefakte Fehlerbehebung:** Verhindert das optische Glitchen und Überlappen des „Neues Artefakt“-Buttons mit dem Zurück-Button und dem Titel beim Wechsel in die Artefakt-Detailansicht.
+- **Notiz-Widget frei vergrößerbar:** Das Notizzettel-Widget lässt sich über den Eckgriff unten rechts stufenlos nach rechts und nach unten vergrößern und verkleinern, wobei sich das Textfeld dynamisch mit anpasst.
+- **Messwert- & Netz-Tempo-Widgets frei skalierbar & sauberes Layout:** Behebt das automatische Anwachsen der Widgets beim Ziehen am Eckgriff; Download- und Upload-Raten sind beim Netz-Tempo nun übersichtlich zusammen unten unter dem freien Verlauf platziert.
 
 ## 3.8.3
 

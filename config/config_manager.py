@@ -19,7 +19,9 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 KEYRING_SERVICE = "PopWin"
 KEYRING_USER = "gemini_api_key"
 
-THEMES = ("liquid_glass", "pop_basic", "clean", "minimalist")
+THEMES = ("liquid_glass", "pop_basic", "clean", "minimalist", "tiles_glass", "tiles_obsidian", "tiles_nova", "tiles_frost",
+          "tiles_neon", "tiles_amber", "tiles_graphite", "tiles_ocean",
+          "glass_clear", "glass_rose", "glass_emerald", "glass_prism", "glass_smoke", "glass_liquid")
 _TERMINAL = "shell:AppsFolder\\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
 
 DEFAULTS: dict[str, Any] = {
@@ -35,6 +37,8 @@ DEFAULTS: dict[str, Any] = {
     "animations": {"enabled": True, "duration": 220},
     "theme": "pop_basic",
     "mode": "dark",
+    "icon_tiles": "theme",  # Kacheln um die Taskbar-Icons: theme = wie im UI-Stil, on, off
+    "tile_shape": "theme",  # Form der Kacheln: theme = wie im UI-Stil, round = komplett rund
     "monitor_mode": "sync",
     "monitor_shared": {},
     "monitors": {},
@@ -124,7 +128,7 @@ DEFAULTS: dict[str, Any] = {
         "speak_engine": "live",  # live: mit Stimme läuft Nova über Gemini Live; tts: normales Modell und Vorlese-Stimme
         "voice": "Zephyr",
         "voice_style": "",  # Sprechweise in Worten, etwa „ruhig und etwas langsamer“
-        "live_model": "gemini-3.1-flash-live-preview",
+        "live_model": "gemini-3.8-live",  # [Antigravity: Aktualisiert von gemini-3.1-flash-live-preview auf gemini-3.8-live]
         "listen_silence": 1.0,  # Sekunden Pause, nach denen Nova merkt, dass man fertig ist
         "listen_followup": True,  # fragt Nova zurück, hört sie gleich wieder zu
         "listen_live": True,  # beim Diktat live zeigen, was verstanden wurde

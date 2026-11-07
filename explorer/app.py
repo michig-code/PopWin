@@ -7,12 +7,16 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
+import logging
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)  # [Antigravity]
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -25,9 +29,9 @@ from PySide6.QtGui import (  # noqa: E402
     QAction, QActionGroup, QColor, QCursor, QGuiApplication, QIcon, QImage, QImageReader, QKeySequence, QMouseEvent, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractItemView, QApplication, QFileIconProvider, QFileSystemModel, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
+    QAbstractItemView, QApplication, QCheckBox, QDialog, QFileIconProvider, QFileSystemModel, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
     QFrame,
-    QPushButton,
+    QProgressBar, QPushButton,  # [Antigravity]
     QListView, QListWidget, QListWidgetItem, QPlainTextEdit, QSplitter, QStackedWidget,
     QStyledItemDelegate, QToolButton,
     QTabBar, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -281,8 +285,26 @@ def sort_key(entry: os.DirEntry, column: int):
 
 
 def grouped_entries(folder: str, group: str, now: float, column: int = 0,
-                    descending: bool = False) -> dict[str, list[os.DirEntry]]:
+                    descending: bool = False, custom_groups: dict[str, str] | None = None) -> dict[str, list[os.DirEntry]]:
     """Ordnet die Einträge eines Ordners in Gruppen wie im Windows-Explorer."""
+    # --- [Antigravity Start: KI-gestützte thematische Gruppierung (Rest: Claude Code)] ---
+    if group == "ai":
+        groups: dict[str, list] = {}
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir():
+                        label = "Ordner"
+                    elif custom_groups and entry.name in custom_groups:
+                        label = custom_groups[entry.name]
+                    else:
+                        label = heuristic_category_single(entry.name)
+                except OSError:
+                    continue
+                groups.setdefault(label, []).append(entry)
+        return {label: sorted(items, key=lambda e: sort_key(e, column), reverse=descending)
+                for label, items in groups.items() if items}
+    # --- [Antigravity Ende] ---
     order = DATE_ORDER if group == "date" else CATEGORY_ORDER
     groups: dict[str, list] = {label: [] for label in order}
     with os.scandir(folder) as entries:
@@ -312,6 +334,126 @@ def search_tree(root: str, needle: str, stop, limit: int = SEARCH_LIMIT):
                 if found >= limit:
                     return
 
+
+
+# --- [Antigravity Start: KI- und Heuristik-Dateisortierung (Rest: Claude Code)] ---
+CATEGORIES_HEURISTIC = {
+    "Rechnungen & Finanzen": {
+        "keywords": ["rechnung", "invoice", "beleg", "quittung", "steuer", "finanz", "konto", "abrechnung", "gehalt", "banking", "auszug", "spesen"],
+        "extensions": [".pdf", ".csv", ".xlsx", ".xls"]
+    },
+    "Bilder & Screenshots": {
+        "keywords": ["screenshot", "bild", "foto", "photo", "screen", "grafik", "wallpaper", "avatar", "icon", "thumb"],
+        "extensions": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".psd", ".tif", ".tiff"]
+    },
+    "Setups & Programme": {
+        "keywords": ["setup", "install", "installer", "update", "patch", "portable", "release"],
+        "extensions": [".exe", ".msi", ".iso", ".bat", ".cmd"]
+    },
+    "Dokumente & Notizen": {
+        "keywords": ["vertrag", "contract", "brief", "notiz", "protokoll", "bericht", "report", "lebenslauf", "cv", "anschreiben", "dokument", "paper"],
+        "extensions": [".pdf", ".docx", ".doc", ".odt", ".txt", ".md", ".rtf", ".pptx"]
+    },
+    "Archive & Backups": {
+        "keywords": ["backup", "archiv", "archive", "sicherung", "dump", "save"],
+        "extensions": [".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz"]
+    },
+    "Code & Entwicklung": {
+        "keywords": ["script", "skript", "test", "build", "config", "docker", "main", "app", "dev"],
+        "extensions": [".py", ".js", ".ts", ".html", ".css", ".json", ".ps1", ".java", ".cpp", ".c", ".cs", ".sql", ".sh", ".yml", ".yaml", ".xml"]
+    },
+    "Videos & Aufnahmen": {
+        "keywords": ["aufnahme", "recording", "video", "clip", "film", "movie", "screenrec"],
+        "extensions": [".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv", ".flv"]
+    },
+    "Audio & Musik": {
+        "keywords": ["song", "musik", "track", "audio", "voice", "sprachmemo", "podcast"],
+        "extensions": [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac"]
+    }
+}
+
+
+def heuristic_category_single(name: str) -> str:
+    ext = os.path.splitext(name)[1].lower()
+    base = os.path.splitext(name)[0].lower()
+    for cat, rule in CATEGORIES_HEURISTIC.items():
+        if any(kw in base for kw in rule["keywords"]):
+            return cat
+    for cat, rule in CATEGORIES_HEURISTIC.items():
+        if ext in rule["extensions"]:
+            return cat
+    return "Sonstiges"
+
+
+BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def safe_folder_name(name: str) -> str:
+    """Ordnername aus einem KI-Vorschlag: keine Pfade wie „..\\“ oder „C:\\“, keine verbotenen Zeichen."""
+    cleaned = " ".join(BAD_NAME_CHARS.sub(" ", str(name)).split()).strip(" .")[:60].strip(" .")
+    if cleaned.upper() in RESERVED_NAMES:
+        cleaned += "_"
+    return cleaned or "Sonstiges"
+
+
+def heuristic_categorize(names: list[str]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for name in names:
+        cat = heuristic_category_single(name)
+        result.setdefault(cat, []).append(name)
+    return result
+
+
+class AiSortWorker(QThread):
+    ready = Signal(dict, bool, str)  # categories: dict[str, list[str]], is_ai: bool, note: str
+
+    def __init__(self, folder: str, file_names: list[str], key: str, models: list[str], parent=None):
+        super().__init__(parent)
+        self.folder = folder
+        self.file_names = file_names
+        self.key = key
+        self.models = models
+
+    def run(self) -> None:
+        if self.key and self.models and len(self.file_names) > 0:
+            prompt = (
+                "Du hilfst beim Sortieren und Organisieren von Dateien in einem Ordner.\n"
+                "Ordne die folgenden Dateien sinnvollen, prägnanten deutschsprachigen Kategorienamen (Ziel-Unterordnern) zu.\n"
+                "Verwende höchstens 7 Kategorien. Erfinde keine Dateinamen, jede Datei aus der Liste muss genau einer Kategorie zugeordnet sein.\n"
+                "Antworte ausschließlich mit reinem JSON im Format: {\"categories\": {\"Kategoriename\": [\"datei1.ext\"]}}\n\n"
+                "Dateien:\n" + "\n".join(self.file_names[:150])
+            )
+            system = "Du bist ein intelligenter Datei-Organisator für PopWin Explorer. Antworte nur mit JSON."
+            try:
+                from core.gemini_client import generate, parse_json
+                reply, model = generate(self.key, self.models, prompt, system)
+                data = parse_json(reply)
+                cats = data.get("categories")
+                if isinstance(cats, dict) and cats:
+                    validated = {}
+                    known_set = set(self.file_names)
+                    assigned = set()
+                    for cat_name, items in cats.items():
+                        if isinstance(items, list):
+                            clean_items = list(dict.fromkeys(f for f in items if f in known_set and f not in assigned))
+                            if clean_items:  # jede Datei nur einmal, auch wenn die KI sie doppelt nennt
+                                validated.setdefault(safe_folder_name(cat_name), []).extend(clean_items)
+                                assigned.update(clean_items)
+                    unassigned = [f for f in self.file_names if f not in assigned]
+                    if unassigned:
+                        fallback_cats = heuristic_categorize(unassigned)
+                        for fcat, fitems in fallback_cats.items():
+                            validated.setdefault(fcat, []).extend(fitems)
+                    if validated:
+                        self.ready.emit(validated, True, f"Mit Gemini ({model}) analysiert")
+                        return
+            except Exception as exc:
+                log.info("Gemini-Dateisortierung fehlgeschlagen, nutze Heuristik: %s", exc)
+
+        cats = heuristic_categorize(self.file_names)
+        self.ready.emit(cats, False, "Mit lokaler Heuristik analysiert")
+# --- [Antigravity Ende] ---
 
 class SearchWorker(QThread):
     hit = Signal(str)
@@ -862,7 +1004,7 @@ class Pane(QWidget):
         for label, value in (("Aufsteigend", Qt.SortOrder.AscendingOrder), ("Absteigend", Qt.SortOrder.DescendingOrder)):
             add(label, value == order, lambda o=value: self.set_sort(column, o))
         menu.addSeparator()
-        for label, value in (("Nicht gruppieren", ""), ("Nach Dateityp gruppieren", "type"), ("Nach Datum gruppieren", "date")):
+        for label, value in (("Nicht gruppieren", ""), ("Nach Dateityp gruppieren", "type"), ("Nach Datum gruppieren", "date"), ("Mit KI nach Themen gruppieren", "ai")):
             add(label, value == self.group, lambda g=value: self.set_group(g))
         menu.addSeparator()
         for label, value in (("Ansicht automatisch", "auto"), ("Immer als Liste", "list"), ("Immer als Blöcke", "blocks")):
@@ -876,6 +1018,16 @@ class Pane(QWidget):
     def set_group(self, group: str) -> None:
         self.group = group
         write_store(group=group)
+        # --- [Antigravity Start: KI-Gruppen bei Bedarf vorbereiten] ---
+        if group == "ai" and getattr(self, "_ai_groups_folder", None) != self.path:  # Gruppen gelten nur für ihren Ordner
+            try:
+                names = [e.name for e in os.scandir(self.path) if e.is_file()]
+                cats = heuristic_categorize(names)
+                self._ai_groups = {fname: cat for cat, flist in cats.items() for fname in flist}
+            except OSError:
+                self._ai_groups = {}
+            self._ai_groups_folder = self.path
+        # --- [Antigravity Ende] ---
         self._show_list()
 
     def _fill_groups(self) -> None:
@@ -885,7 +1037,9 @@ class Pane(QWidget):
         try:
             header = self.view.header()
             groups = grouped_entries(self.path, self.group, time.time(), header.sortIndicatorSection(),
-                                     header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
+                                     header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder,
+                                     custom_groups=getattr(self, "_ai_groups", None)
+                                     if getattr(self, "_ai_groups_folder", None) == self.path else None)  # [Antigravity]
         except OSError:
             return
         for label, entries in groups.items():
@@ -1040,6 +1194,12 @@ class Pane(QWidget):
         paths = self.selection()
         self.context_menu.show_custom(QCursor.pos(), lambda menu: self._fill_menu(menu, paths))
 
+    def _open_ai_sort(self, target_paths: list[str] | None = None) -> None:
+        # [Antigravity: KI-Sortierdialog öffnen]
+        dialog = AiSortDialog(self.ctx, self, target_paths, parent=self.window())
+        self._active_ai_sort = dialog
+        dialog.show()
+
     def _fill_menu(self, menu: ContextMenu, paths: list[str]) -> None:
         if paths:
             self._file_items(menu, paths)
@@ -1049,6 +1209,7 @@ class Pane(QWidget):
         menu.addSeparator()
         menu.add_item("Neuer Ordner", G.FOLDER, self.new_folder)
         menu.add_item("Diesen Ordner zum Schnellzugriff", G.PIN, lambda: self.pin_place.emit(self.path))
+        menu.add_item("Dateien mit KI sortieren …", G.QUICK, lambda: self._open_ai_sort())  # [Antigravity]
         menu.add_item("Terminal hier öffnen", G.TERMINAL, self._open_terminal)
         menu.add_item("Im Windows-Explorer öffnen", G.WINDOWS, lambda: win_api.shell_open(self.path))
 
@@ -1067,6 +1228,7 @@ class Pane(QWidget):
             menu.add_item("Zum Schnellzugriff", G.PIN, lambda: [self.pin_place.emit(path) for path in folders])
         marked = all(FAVORITES.has(path) for path in paths)
         menu.add_item("Aus Favoriten entfernen" if marked else "Zu Favoriten", G.PIN, lambda: self.toggle_favorite(paths))
+        menu.add_item("Auswahl mit KI sortieren …", G.QUICK, lambda: self._open_ai_sort(paths))  # [Antigravity]
         menu.add_item("In den Papierkorb", G.TRASH, lambda: self.recycle(paths))
         menu.addSeparator()
         menu.add_shell_items(int(self.window().winId()), paths)
@@ -1222,6 +1384,224 @@ class TearTabBar(QTabBar):
         index, position = self.currentIndex(), event.globalPosition().toPoint()
         QTimer.singleShot(0, lambda: self.torn.emit(index, position))
 
+
+
+# --- [Antigravity Start: Dialog zum KI-Dateisortieren & Aufräumen (Rest: Claude Code)] ---
+class AiSortDialog(NativeWindow):
+    def __init__(self, ctx, pane: "Pane", target_paths: list[str] | None = None, parent=None):
+        super().__init__(ctx, "Dateien mit KI sortieren", "apps/explorer")
+        self.pane = pane
+        self.folder = pane.path
+        self.target_paths = target_paths or []
+        self.resize(700, 560)
+        if hasattr(self.titlebar, "minimize"):
+            self.titlebar.minimize.hide()
+        if hasattr(self.titlebar, "maximize"):
+            self.titlebar.maximize.hide()
+
+        if self.target_paths:
+            self.file_names = [os.path.basename(p) for p in self.target_paths if os.path.isfile(p)]
+        else:
+            try:
+                self.file_names = [e.name for e in os.scandir(self.folder) if e.is_file()]
+            except OSError:
+                self.file_names = []
+
+        self.categories: dict[str, list[str]] = {}
+        self.icons = pane.icons
+
+        box = QVBoxLayout(self.content)
+        box.setContentsMargins(18, 14, 18, 16)
+        box.setSpacing(10)
+
+        head = QVBoxLayout()
+        head.setSpacing(2)
+        title = QLabel("Dateien mit KI sortieren", objectName="Heading")
+        title.setStyleSheet("font-size: 16px; font-weight: 700; color: #FFFFFF;")
+        folder_display = os.path.basename(self.folder.rstrip("\\/")) or self.folder
+        self.info_label = QLabel(f"Ordner: {folder_display}  ·  {len(self.file_names)} Dateien gefunden")
+        self.info_label.setStyleSheet("color: rgba(220, 225, 255, 0.7); font-size: 12px;")
+        self.status_label = QLabel("⏳ Analysiere Dateien mit KI …")
+        self.status_label.setStyleSheet("color: #F2C94C; font-size: 12px; font-weight: 600;")
+
+        head.addWidget(title)
+        head.addWidget(self.info_label)
+        head.addWidget(self.status_label)
+        box.addLayout(head)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setFixedHeight(4)
+        self.progress.setTextVisible(False)
+        box.addWidget(self.progress)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Datei / Zielordner", "Größe", "Aktion / Ziel"])
+        self.tree.setColumnWidth(0, 360)
+        self.tree.setColumnWidth(1, 90)
+        self.tree.setColumnWidth(2, 170)
+        self.tree.setStyleSheet("QTreeWidget { background: rgba(16, 18, 30, 0.6); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; }")
+        self.tree.itemChanged.connect(self._item_toggled)
+        box.addWidget(self.tree, 1)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+
+        self.cancel_btn = QPushButton("Abbrechen", objectName="Secondary")
+        self.cancel_btn.clicked.connect(self.close)
+        bottom.addWidget(self.cancel_btn)
+
+        bottom.addStretch(1)
+
+        self.group_btn = QPushButton("Nur in Ansicht gruppieren", objectName="Secondary")
+        self.group_btn.setToolTip("Gruppiert die Dateien im Explorer nach diesen KI-Kategorien, ohne sie physisch zu verschieben")
+        self.group_btn.clicked.connect(self._apply_view_grouping)
+        self.group_btn.setEnabled(False)
+        bottom.addWidget(self.group_btn)
+
+        self.sort_btn = QPushButton("Jetzt in Ordner sortieren", objectName="Primary")
+        self.sort_btn.clicked.connect(self._apply_move)
+        self.sort_btn.setEnabled(False)
+        bottom.addWidget(self.sort_btn)
+
+        box.addLayout(bottom)
+
+        if not self.file_names:
+            self.status_label.setText("Keine Dateien im Ordner vorhanden.")
+            self.status_label.setStyleSheet("color: rgba(220, 225, 255, 0.5);")
+            self.progress.hide()
+            return
+
+        key = self.ctx.config.api_key()
+        models = [m.strip() for m in self.ctx.config.get("nova.models").split(",") if m.strip()] if self.ctx.config.get("nova.models") else []
+        if not models:
+            models = ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.1-flash-lite"]
+        self.worker = AiSortWorker(self.folder, self.file_names, key, models, self)
+        self.worker.ready.connect(self._results_ready)
+        self.worker.start()
+
+    def _results_ready(self, categories: dict[str, list[str]], is_ai: bool, note: str) -> None:
+        self.categories = categories
+        self.progress.hide()
+        badge = "✨ Gemini KI" if is_ai else "⚡ Lokale Heuristik"
+        self.status_label.setText(f"{badge}: {len(categories)} Kategorien vorgeschlagen ({note})")
+        self.status_label.setStyleSheet("color: #41cd52; font-size: 12px; font-weight: 600;" if is_ai else "color: #79a6dc; font-size: 12px;")
+        self._populate_tree()
+        self.group_btn.setEnabled(True)
+        self.sort_btn.setEnabled(True)
+
+    def _populate_tree(self) -> None:
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        for cat_name, fnames in self.categories.items():
+            cat_item = QTreeWidgetItem([f"📁 {cat_name} ({len(fnames)})", "", f"→ {cat_name}\\"])
+            cat_item.setFlags(cat_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            cat_item.setCheckState(0, Qt.CheckState.Checked)
+            cat_item.setData(0, Qt.ItemDataRole.UserRole, "category")
+            cat_item.setData(0, Qt.ItemDataRole.UserRole + 1, cat_name)
+
+            for fname in sorted(fnames):
+                fpath = os.path.join(self.folder, fname)
+                try:
+                    fsize = os.path.getsize(fpath)
+                    size_str = f"{fsize / 1024:,.0f} KB".replace(",", ".") if fsize >= 1024 else f"{fsize} B"
+                except OSError:
+                    size_str = ""
+                file_item = QTreeWidgetItem([fname, size_str, f"→ {cat_name}\\"])
+                file_item.setFlags(file_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                file_item.setCheckState(0, Qt.CheckState.Checked)
+                file_item.setIcon(0, self.icons.icon(QFileInfo(fpath)))
+                file_item.setData(0, Qt.ItemDataRole.UserRole, "file")
+                file_item.setData(0, Qt.ItemDataRole.UserRole + 1, (fname, cat_name))
+                cat_item.addChild(file_item)
+
+            self.tree.addTopLevelItem(cat_item)
+            cat_item.setExpanded(True)
+        self.tree.blockSignals(False)
+        self._update_button_label()
+
+    def _item_toggled(self, item: QTreeWidgetItem, column: int) -> None:
+        if column != 0:
+            return
+        self.tree.blockSignals(True)
+        kind = item.data(0, Qt.ItemDataRole.UserRole)
+        if kind == "category":
+            state = item.checkState(0)
+            for i in range(item.childCount()):
+                item.child(i).setCheckState(0, state)
+        self.tree.blockSignals(False)
+        self._update_button_label()
+
+    def _update_button_label(self) -> None:
+        count = sum(1 for i in range(self.tree.topLevelItemCount())
+                    for j in range(self.tree.topLevelItem(i).childCount())
+                    if self.tree.topLevelItem(i).child(j).checkState(0) == Qt.CheckState.Checked)
+        self.sort_btn.setText(f"Jetzt in Ordner sortieren ({count})")
+        self.sort_btn.setEnabled(count > 0)
+
+    def _apply_view_grouping(self) -> None:
+        if not self.categories:
+            return
+        mapping = {}
+        for cat, items in self.categories.items():
+            for item in items:
+                mapping[item] = cat
+        self.pane._ai_groups = mapping
+        self.pane._ai_groups_folder = self.folder
+        self.pane.set_group("ai")
+        self.close()
+
+    def _apply_move(self) -> None:
+        moved = []
+        failed: list[str] = []
+        created_dirs = set()
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            cat_name = top.data(0, Qt.ItemDataRole.UserRole + 1)
+            target_dir = os.path.join(self.folder, cat_name)
+            for j in range(top.childCount()):
+                child = top.child(j)
+                if child.checkState(0) != Qt.CheckState.Checked:
+                    continue
+                fname, _ = child.data(0, Qt.ItemDataRole.UserRole + 1)
+                src = os.path.join(self.folder, fname)
+                if not os.path.isfile(src) or inside_itself(src, target_dir):
+                    continue
+                try:
+                    if not os.path.exists(target_dir):
+                        os.makedirs(target_dir, exist_ok=True)
+                        created_dirs.add(target_dir)
+                    moved.append((src, transfer_file(src, target_dir, move=True)))
+                except OSError as exc:  # etwa eine geöffnete Datei: die anderen trotzdem sortieren
+                    log.info("KI-Sortierung: %s nicht verschoben: %s", fname, exc)
+                    failed.append(fname)
+
+        if moved:
+            pane = self.pane
+            folder = self.folder
+            def undo():
+                for orig_src, orig_dst in moved:
+                    if os.path.exists(orig_dst) and not os.path.exists(orig_src):  # nie eine neue Datei überschreiben
+                        try:
+                            shutil.move(orig_dst, orig_src)
+                        except OSError:
+                            pass
+                for cdir in created_dirs:
+                    try:
+                        if os.path.isdir(cdir) and not os.listdir(cdir):
+                            os.rmdir(cdir)
+                    except OSError:
+                        pass
+                pane.open(folder)
+
+            self.pane.undoable.emit(f"KI-Sortierung ({len(moved)} Dateien)", undo)
+
+        self.pane.open(self.folder)
+        if failed:
+            QMessageBox.information(self, "PopWin Explorer", f"{len(failed)} Datei(en) ließen sich nicht verschieben, "
+                                    f"etwa weil sie gerade offen sind:\n" + "\n".join(failed[:10]))
+        self.close()
+# --- [Antigravity Ende] ---
 
 class PlacesList(QListWidget):
     """Seitenleiste: Einträge per Maus anordnen, Ordner hineinziehen, per Rechtsklick entfernen."""
@@ -1407,6 +1787,7 @@ class ExplorerWindow(NativeWindow):
                                     ("\uE74D", "Löschen", self._delete)):
             bar.addWidget(self._command("", glyph, tip, handler))  # wie die Symbolleiste im Windows-Explorer
         bar.addStretch(1)
+        bar.addWidget(self._command("KI-Sortieren", "\uE945", "Dateien mit KI analysieren und aufräumen", self._open_ai_sort))  # [Antigravity]
         bar.addWidget(self._command("Sortieren", "\uE8CB", "Sortieren, gruppieren und Ansicht", self._sort_menu))
         bar.addWidget(self._command("Vorschau", "\uE8A1", "Vorschau ein- oder ausblenden", self.toggle_preview))
         return bar
@@ -1420,6 +1801,10 @@ class ExplorerWindow(NativeWindow):
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.clicked.connect(handler)
         return button
+
+    def _open_ai_sort(self) -> None:
+        # [Antigravity: KI-Sortierdialog aufrufen]
+        self.current_pane()._open_ai_sort()
 
     def _sort_menu(self) -> None:
         button = self.sender()

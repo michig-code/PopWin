@@ -428,9 +428,10 @@ class NovaController(QObject):
             self.ctx.nova_panel.ask_for_key(text)
             return
         from google.genai import types
+        # [Antigravity: Verlauf vor neuem Log-Eintrag laden, um Doppelungen zu verhindern]
+        contents = self._history()
         self.log.add("user", text)
         self.user_message.emit(text)
-        contents = self._history()
         contents.append(types.Content(role="user", parts=[types.Part(text=text)]))
         if self.live_wanted():  # mit Stimme antwortet Nova über Gemini Live, getippt wie gesprochen
             from core.nova_voice import LiveTalk

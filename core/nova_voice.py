@@ -6,6 +6,7 @@ bevor Nova antwortet. Ein offenes Headset-Mikrofon zwingt Bluetooth-Kopfhörer i
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import queue
 import re
@@ -35,6 +36,25 @@ BLOCK = 1600  # 100 ms Ton pro Stück
 NO_SPEECH_SECONDS = 8  # so lange wartet das offene Mikro auf das erste Wort
 CONTEXT_MESSAGES = 16  # so viel vom Text-Chat kennt Nova im Gespräch
 QUESTION_END = re.compile(r"\?[\W_]*$")
+
+
+# --- [Antigravity Start: gemini-3.8-live als Standard und automatische Migration (Rest: Claude Code)] ---
+LIVE_DEFAULT_MODEL = "gemini-3.8-live"
+
+
+def live_model_name(name: str | None) -> str:
+    if not name or "3.1-flash-live" in name or "2.0-flash-live" in name or "2.5-flash-native" in name:
+        return LIVE_DEFAULT_MODEL
+    return name
+
+
+LIVE_FALLBACK_MODEL = "gemini-3.1-flash-live-preview"  # bewährt, falls das neue Modell (noch) nicht antwortet
+
+
+def live_models(name: str | None) -> list[str]:
+    """Reihenfolge der Versuche: das gewählte Modell, dann das bewährte alte."""
+    return list(dict.fromkeys([live_model_name(name), LIVE_FALLBACK_MODEL]))
+# --- [Antigravity Ende] ---
 
 
 def voice_name(name: str) -> str:
@@ -198,13 +218,22 @@ class LiveTalk(NovaTurn):
         speaker = Speaker()
         self.stage.emit("verbindet")
         try:
-            async with client.aio.live.connect(model=settings["live_model"], config=self._config()) as session:
-                context = text_context(self.contents[:-1] if self.typed else self.contents)  # das Getippte geht gleich als Frage raus
-                if context:
-                    await session.send_client_content(turns=context, turn_complete=False)
+            async with contextlib.AsyncExitStack() as stack:
+                session = await self._connect(stack, client, live_models(settings.get("live_model")))
+                # [Antigravity Start: Kontext und Frage bei getippter Nachricht zusammen senden für nahtlose Fortsetzung]
+                context = text_context(self.contents[:-1] if self.typed else self.contents)
+                if self.typed:
+                    all_turns = context + [types.Content(role="user", parts=[types.Part(text=self.typed)])]
+                    await session.send_client_content(turns=all_turns, turn_complete=True)
+                    self.stage.emit("denkt nach")
+                    typed = ""
+                else:
+                    if context:
+                        await session.send_client_content(turns=context, turn_complete=False)
+                    typed = ""
+                # [Antigravity Ende]
                 sender = asyncio.create_task(self._send_audio(session, chunks, microphone))
                 try:
-                    typed = self.typed
                     while not self.cancelled:
                         if typed:
                             await session.send_client_content(turns=[types.Content(role="user", parts=[types.Part(text=typed)])],
@@ -237,6 +266,17 @@ class LiveTalk(NovaTurn):
                     await asyncio.sleep(0.1)
                 speaker.close()
 
+    async def _connect(self, stack: contextlib.AsyncExitStack, client, models: list[str]):
+        """Verbindet mit dem ersten Live-Modell, das antwortet. So bleibt die Stimme, auch wenn ein Name nicht stimmt."""
+        error: Exception | None = None
+        for model in models:
+            try:
+                return await stack.enter_async_context(client.aio.live.connect(model=model, config=self._config()))
+            except Exception as exc:
+                log.info("Gemini Live mit %s nicht erreichbar: %s", model, str(exc)[:160])
+                error = exc
+        raise error
+
     async def _send_audio(self, session, chunks: asyncio.Queue, microphone: Microphone) -> None:
         from google.genai import types
         while True:
@@ -255,6 +295,8 @@ class LiveTalk(NovaTurn):
         from google.genai import types
         limit = self.nova.ctx.config.get("launcher.voice_seconds")
         spoke = False
+        played_audio = False
+        turn_answer = ""
         receiver = session.receive().__aiter__()
         while not self.cancelled:
             if microphone.is_open:
@@ -299,17 +341,60 @@ class LiveTalk(NovaTurn):
             if content.output_transcription and content.output_transcription.text:
                 self._stop_microphone(microphone)
                 self.answer += content.output_transcription.text
+                turn_answer += content.output_transcription.text
                 self.text.emit(content.output_transcription.text)
             for part in (content.model_turn.parts or []) if content.model_turn else []:
                 if part.inline_data and part.inline_data.data:
+                    played_audio = True
                     self._stop_microphone(microphone)
                     self.stage.emit("spricht")
                     speaker.play(part.inline_data.data)
             if content.interrupted:
                 speaker.flush()
             if content.turn_complete:
+                # --- [Antigravity Start: TTS-Fallback falls Live-Modell bei langen Prompts keine Audiospur lieferte] ---
+                if not played_audio and turn_answer.strip():
+                    await self._fallback_tts(turn_answer.strip(), speaker)
+                # --- [Antigravity Ende] ---
                 return True
         return False
+
+    # --- [Antigravity Start: Robuster Fallback-Sprecher (Rest: Claude Code)] ---
+    async def _fallback_tts(self, text: str, speaker: Speaker) -> None:
+        """Falls das Live-Modell bei sehr langen Prompts/Kontexten keine Audiospur liefert, spricht Nova per TTS."""
+        from core.nova_controller import TTS_MODELS
+        from google.genai import types
+        settings = self.nova.ctx.config.get("nova")
+        voice = voice_name(settings.get("voice"))
+        style = settings.get("voice_style", "")
+        clean_text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+        clean_text = " ".join(re.sub(r"[*_#`>~|]", "", clean_text).split())
+        if not clean_text:
+            return
+        spoken = f"Sprich {style.strip().rstrip(':')}: {clean_text}" if style.strip() else clean_text
+        tts_cfg = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice))))
+
+        def fetch_audio():
+            client = client_for(self.key)
+            for m in TTS_MODELS:
+                try:
+                    for chunk in client.models.generate_content_stream(model=m, contents=spoken, config=tts_cfg):
+                        if self.cancelled:
+                            return
+                        c = chunk.candidates[0].content if chunk.candidates else None
+                        for p in (c.parts or []) if c else []:
+                            if p.inline_data and p.inline_data.data:
+                                speaker.play(p.inline_data.data)
+                    return
+                except Exception as exc:
+                    log.info("LiveTalk TTS-Fallback mit %s fehlgeschlagen: %s", m, str(exc)[:120])
+
+        self.stage.emit("spricht")
+        await asyncio.to_thread(fetch_audio)
+    # --- [Antigravity Ende] ---
 
     def finish_speaking(self) -> None:
         """Der Host sagt per Klick, dass er fertig ist; sonst merkt Gemini das an der Pause."""

@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 # Installiert liegen Novas Daten bei den Einstellungen und überleben so jedes Update.
 NOVA_DATA = DATA_DIR / "nova" if FROZEN else ROOT / "nova" / "data"
 PERSONA = ROOT / "assets" / "nova_persona.md"
+CUSTOM_PERSONA = NOVA_DATA / "custom_persona.md"  # [Antigravity: Eigene Persönlichkeit]
 OLD_MEMORY = Path(os.environ.get("LOCALAPPDATA", "")) / "CopilotPro" / "memory.json"
 SAVED_MESSAGES = 200
 DAYS = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
@@ -55,12 +56,46 @@ ARTEFAKTE:
 """.strip()
 
 
-def load_persona() -> str:
+# --- [Antigravity Start: Novas Persönlichkeit anpassbar und zurücksetzbar (Rest: Claude Code)] ---
+def default_persona() -> str:
     try:
         return PERSONA.read_text(encoding="utf-8").strip()
-    except OSError as exc:  # ohne Persönlichkeit soll der Chat trotzdem antworten
-        log.warning("Novas Persönlichkeit nicht lesbar: %s", exc)
+    except OSError as exc:
+        log.warning("Novas Standard-Persönlichkeit nicht lesbar: %s", exc)
         return "Du bist Nova, eine hilfreiche KI-Copilotin."
+
+
+def load_persona() -> str:
+    if CUSTOM_PERSONA.exists():
+        try:
+            custom = CUSTOM_PERSONA.read_text(encoding="utf-8").strip()
+            if custom:
+                return custom
+        except OSError:
+            pass
+    return default_persona()
+
+
+def save_custom_persona(text: str) -> None:
+    NOVA_DATA.mkdir(parents=True, exist_ok=True)
+    cleaned = text.strip()
+    if not cleaned or cleaned == default_persona():
+        reset_persona()
+    else:
+        CUSTOM_PERSONA.write_text(cleaned, encoding="utf-8")
+
+
+def reset_persona() -> None:
+    if CUSTOM_PERSONA.exists():
+        try:
+            CUSTOM_PERSONA.unlink()
+        except OSError:
+            pass
+
+
+def is_custom_persona() -> bool:
+    return CUSTOM_PERSONA.exists()
+# --- [Antigravity Ende] ---
 
 
 def now_line(moment: datetime) -> str:
