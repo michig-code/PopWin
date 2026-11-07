@@ -116,6 +116,36 @@ def app_name(app_id: str, apps: list) -> str:
     return tail.rsplit(".", 1)[-1] or app_id
 
 
+def app_tail(app_id: str) -> str:
+    """Lesbarer Kern einer App-Kennung: „com.squirrel.Discord.Discord“ -> „discord“."""
+    tail = app_id.split("!")[0].split("_")[0].rsplit("\\", 1)[-1].lower().removesuffix(".exe")
+    return tail.rsplit(".", 1)[-1]
+
+
+def notice_labels(notices: list[Notice], apps: list) -> dict[str, str]:
+    """App-Namen der Benachrichtigungen, einmal nachgeschlagen statt für jeden Knopf neu."""
+    return {notice.app_id: app_name(notice.app_id, apps).lower() for notice in notices}
+
+
+def notice_belongs(app_id: str, key: str, target: str, name: str, label: str = "") -> bool:
+    """Gehört eine Benachrichtigung zu dem Taskbar-Knopf mit dieser Kennung, diesem Ziel und Namen?"""
+    if target and target.lower() == ("shell:appsfolder\\" + app_id).lower():
+        return True
+    stem = os.path.basename(key.lower()).removesuffix(".exe")
+    if stem and stem == app_tail(app_id):
+        return True
+    return bool(name) and bool(label) and label == name.lower()
+
+
+def badge_count(notices: list[Notice], key: str, target: str, name: str, labels: dict[str, str]) -> int:
+    """Zahl für den roten Punkt am App-Icon: offene Benachrichtigungen dieser App."""
+    return sum(notice_belongs(n.app_id, key, target, name, labels.get(n.app_id, "")) for n in notices)
+
+
+def badge_text(count: int) -> str:
+    return "" if count <= 0 else ("9+" if count > 9 else str(count))
+
+
 def format_age(moment: datetime, now: datetime) -> str:
     minutes = int((now - moment).total_seconds() // 60)
     if minutes < 1:

@@ -19,13 +19,32 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 KEYRING_SERVICE = "PopWin"
 KEYRING_USER = "gemini_api_key"
 
-THEMES = ("liquid_glass", "pop_basic", "clean", "minimalist", "tiles_glass", "tiles_obsidian", "tiles_nova", "tiles_frost",
-          "tiles_neon", "tiles_amber", "tiles_graphite", "tiles_ocean",
-          "glass_clear", "glass_rose", "glass_emerald", "glass_prism", "glass_smoke", "glass_liquid")
+THEMES = ("liquid_glass", "pop_basic", "clean", "minimalist", "tiles_graphite", "tiles_obsidian", "tiles_frost",
+          "glass_clear", "glass_smoke", "neon_night")
+CUSTOM_THEME_PREFIX = "custom_"  # eigene Themes aus dem Theme-Editor (core/theme_maker.py)
+# Ausgemusterte Stile -> der ähnlichste, der geblieben ist
+REMOVED_THEMES = {"tiles_glass": "tiles_obsidian", "tiles_nova": "tiles_obsidian", "tiles_neon": "tiles_graphite",
+                  "tiles_amber": "tiles_graphite", "tiles_ocean": "tiles_frost", "glass_rose": "glass_clear",
+                  "glass_emerald": "glass_clear", "glass_prism": "glass_clear", "glass_liquid": "liquid_glass"}
+
+
+def migrate_themes(data: dict) -> None:
+    """Wer einen ausgemusterten Stil eingestellt hatte, bekommt den ähnlichsten; überall, wo ein Stil stehen kann."""
+    def swap(holder: dict, key: str) -> None:
+        if isinstance(holder, dict) and holder.get(key) in REMOVED_THEMES:
+            holder[key] = REMOVED_THEMES[holder[key]]
+    swap(data, "theme")
+    for section in ("context_menu", "launcher"):
+        swap(data.get(section), "theme")
+    swap(data.get("monitor_shared"), "theme")
+    for profile in (data.get("monitors") or {}).values():
+        swap(profile, "theme")
 _TERMINAL = "shell:AppsFolder\\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
 
 DEFAULTS: dict[str, Any] = {
     "first_run": True,
+    "settings_v2": True,  # Einstellungen mit Übersicht und Kategorien; aus = klassische Liste
+    "settings_v2_since_4": True,  # Merker: Wer von 3.x kommt, bekommt das neue Menü einmal eingeschaltet
     "language": "auto",
     "hide_missing_hardware": True,
     "network": {"hourly_test": False},
@@ -35,6 +54,10 @@ DEFAULTS: dict[str, Any] = {
     "popwin_file_dialog": False,
     "desktop_groups": {"style": "off", "layout": {"order": [], "groups": {}}},
     "animations": {"enabled": True, "duration": 220},
+    # saver: keine Animationen, seltener nachsehen; balanced: wie bisher; beautiful: alle Effekte
+    # game_mode: Leisten ruhen hinter Vollbild-Spielen
+    "performance": {"level": "balanced", "game_mode": True},
+    "windows_trim": {},  # Windows entlasten: Kennung aus core.process_trim -> an/aus
     "theme": "pop_basic",
     "mode": "dark",
     "icon_tiles": "theme",  # Kacheln um die Taskbar-Icons: theme = wie im UI-Stil, on, off
@@ -58,6 +81,7 @@ DEFAULTS: dict[str, Any] = {
         "screen_pins": {},
         "order": {},
         "preview": True,
+        "magnify": False,  # Beta: Icons wachsen wie am Mac, wenn die Maus darüber fährt
         "pinned": [
             {"name": "Explorer", "target": "explorer.exe"},
             {"name": "Terminal", "target": _TERMINAL, "exe": "windowsterminal.exe"},
@@ -98,6 +122,7 @@ DEFAULTS: dict[str, Any] = {
     "start_menu": {
         "win_key": "home",
         "win_key_screen": "cursor",  # cursor, primary
+        "layout": "grid",  # Aussehen: grid, list, tiles, strip, search (ui/start_menu.py VARIANTS)
         "columns": 4,
         "icon_size": 36,
         "width": 420,
@@ -115,6 +140,7 @@ DEFAULTS: dict[str, Any] = {
     "widgets": [],
     "widgets_visible": True,
     "nova": {
+        "enabled": True,  # Nein im Setup: Knöpfe und Tastenkürzel weg, Nova wartet in den Einstellungen
         "hotkey": "ctrl+alt+n",
         "economy": "sparsam",
         "from_search": True,
@@ -142,7 +168,7 @@ DEFAULTS: dict[str, Any] = {
         "models": "gemini-3.5-flash,gemini-3.6-flash,gemini-3-flash-preview,gemini-3.5-flash-lite",
     },
     "shell": {"hide_native_taskbar": True, "saved_taskbar_state": None},
-    "updates": {"auto_check": True, "skipped": ""},
+    "updates": {"auto_check": True, "skipped": "", "seen": ""},  # seen: Version, deren „Was ist neu“ schon lief
     "app_usage": {},  # [Antigravity: App-Nutzungshäufigkeit für Such-Ranking]
 }
 
@@ -162,6 +188,7 @@ MONITOR_DEFAULTS: dict[str, Any] = {
     "show_nova": False,  # der Nova-Knopf sitzt in der Taskbar; hier nur auf Wunsch
     "show_notifications": True,
     "show_windows": True,
+    "user_click": "account",  # account: Benutzer-Bereich, windows: gleich die offenen Fenster
     "topbar_auto_hide": False,
     "show_tray": True,
     "show_cloud": True,
@@ -170,7 +197,11 @@ MONITOR_DEFAULTS: dict[str, Any] = {
     "show_bluetooth": True,
     "show_battery": True,
     "show_volume": True,
-    "top_order": ["tray", "cloud", "mic", "network", "bluetooth", "battery", "volume", "quick", "nova", "bell"],
+    "show_language": True,  # Sprachanzeige wie „DEU“, nur wenn mehr als ein Tastatur-Layout da ist
+    "show_project": True,  # Knopf „Bildschirm projizieren“ (Win+P)
+    "show_snip": True,  # Knopf fürs Ausschneide-Tool
+    "top_order": ["tray", "cloud", "mic", "lang", "network", "bluetooth", "battery", "volume", "project", "snip",
+                  "quick", "nova", "bell"],
     "topbar_height": 0,  # 0 = Höhe des Themes
     "clock_style": "both",  # both, time, date
     "clock_lines": "two",  # two, one
@@ -191,10 +222,16 @@ MONITOR_DEFAULTS: dict[str, Any] = {
     "task_indicator": "bar",  # bar, dot, none
     "task_labels": False,
     "task_counts": False,
+    "task_badges": True,  # roter Punkt mit der Zahl offener Benachrichtigungen am App-Icon
     "icon_size": 26,
     "icon_spacing": 3,
     "dock_height": 0,  # 0 = Höhe des Themes
     "dock_style": "full",
+    "dock_floating": False,  # schwebende runde Pille mit Abstand zum Rand
+    # Reihenfolge der festen Knöpfe der Taskbar; "apps" steht für die App-Icons. Was davor steht, sitzt links neben
+    # den Apps, der Rest rechts. Lässt sich direkt auf der Taskbar per Drag-and-drop umstellen.
+    "dock_order": ["start", "search", "apps", "media", "nova", "trash", "desktop"],
+    "dock_gap": 10,  # Abstand der schwebenden Pille zum Bildschirmrand in Pixeln
     "dock_align": "center",
 }
 # Diese Felder verändern, welche Leisten es gibt; die übrigen übernehmen die Leisten direkt.
@@ -257,7 +294,10 @@ class ConfigManager(QObject):
                 pass
             loaded = {}
         data = _merge(DEFAULTS, loaded)
-        if data["theme"] not in THEMES:
+        migrate_themes(data)
+        if loaded and "settings_v2_since_4" not in loaded:  # ab 4.0 Standard, auch wenn früher „aus“ gespeichert war
+            data["settings_v2"] = True
+        if data["theme"] not in THEMES and not str(data["theme"]).startswith(CUSTOM_THEME_PREFIX):
             data["theme"] = DEFAULTS["theme"]
         if data["mode"] not in ("dark", "light"):
             data["mode"] = "dark"
@@ -407,3 +447,109 @@ class ConfigManager(QObject):
                 result[k] = int(v)
         return result
     # --- [Antigravity Ende: App-Nutzungshäufigkeit für Such-Ranking] ---
+
+
+# --- Einstellungen teilen: Export, Import und Presets -------------------------------
+EXPORT_FORMAT = "popwin-settings"
+EXPORT_VERSION = 1
+PRESETS_DIR = DATA_DIR / "presets"
+# Was nur auf diesen PC passt oder privat ist, wandert nie in eine geteilte Datei
+PRIVATE_KEYS = ("first_run", "monitors", "app_usage", "shell", "updates", "widgets", "monitor_mode")
+PRIVATE_PATHS = ("taskbar.screen_pins", "taskbar.order", "taskbar.windows_pins_imported", "nova.connections",
+                 "wallpaper.file", "notifications.hidden", "desktop_groups.layout", "privacy")
+
+
+def shareable(data: dict) -> dict:
+    """Kopie der Einstellungen ohne Privates und ohne das, was nur auf diesem PC Sinn ergibt."""
+    shared = copy.deepcopy(data)
+    for key in PRIVATE_KEYS:
+        shared.pop(key, None)
+    for dotted in PRIVATE_PATHS:
+        *parents, last = dotted.split(".")
+        node = shared
+        for part in parents:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(last, None)
+    return shared
+
+
+def apply_shared(current: dict, shared: dict) -> dict:
+    """Mischt geteilte Einstellungen über die eigenen; Privates und Falsches bleiben wie sie sind."""
+    incoming = shareable(shared)
+    migrate_themes(incoming)  # eine Datei von einem Freund mit älterem PopWin
+    merged = _merge(current, incoming)
+    for key in PRIVATE_KEYS:  # _merge übernimmt unbekannte Schlüssel; Privates nie
+        if key in current:
+            merged[key] = copy.deepcopy(current[key])
+    for dotted in PRIVATE_PATHS:
+        *parents, last = dotted.split(".")
+        source, target = current, merged
+        for part in parents:
+            source = source.get(part, {}) if isinstance(source, dict) else {}
+            target = target.get(part) if isinstance(target, dict) else None
+        if isinstance(target, dict) and isinstance(source, dict) and last in source:
+            target[last] = copy.deepcopy(source[last])
+    return merged
+
+
+def export_document(data: dict, name: str = "") -> dict:
+    return {"format": EXPORT_FORMAT, "version": EXPORT_VERSION, "name": name, "settings": shareable(data)}
+
+
+def read_document(text: str) -> tuple[str, dict]:
+    """Name und Einstellungen aus einer geteilten Datei; ValueError, wenn es keine PopWin-Datei ist."""
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Die Datei ist kein gültiges JSON.") from exc
+    if not isinstance(document, dict) or document.get("format") != EXPORT_FORMAT:
+        raise ValueError("Das ist keine PopWin-Einstellungsdatei.")
+    settings = document.get("settings")
+    if not isinstance(settings, dict):
+        raise ValueError("In der Datei stehen keine Einstellungen.")
+    return str(document.get("name") or ""), settings
+
+
+def preset_file(name: str, folder: Path = PRESETS_DIR) -> Path:
+    """Dateiname für ein Preset; Zeichen, die Windows in Dateinamen verbietet, fallen weg."""
+    clean = "".join(char for char in name.strip() if char not in '<>:"/\\|?*' and ord(char) >= 32).strip(" .")
+    if not clean:
+        raise ValueError("Bitte gib dem Preset einen Namen.")
+    return folder / f"{clean[:60]}.json"
+
+
+def list_presets(folder: Path = PRESETS_DIR) -> list[str]:
+    return sorted((file.stem for file in folder.glob("*.json")), key=str.lower) if folder.is_dir() else []
+
+
+def _write_json(path: Path, document: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(document, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def export_settings(config: "ConfigManager", path: Path, name: str = "") -> None:
+    _write_json(Path(path), export_document(config.data, name))
+
+
+def save_preset(config: "ConfigManager", name: str, folder: Path = PRESETS_DIR) -> Path:
+    path = preset_file(name, folder)
+    _write_json(path, export_document(config.data, name.strip()))
+    return path
+
+
+def import_settings(config: "ConfigManager", path: Path) -> str:
+    """Übernimmt eine geteilte Datei oder ein Preset; gibt dessen Namen zurück."""
+    name, settings = read_document(Path(path).read_text(encoding="utf-8"))
+    config.data = apply_shared(config.data, settings)
+    config.save()
+    config.changed.emit("monitors")
+    config.changed.emit("profile")
+    return name
+
+
+def delete_preset(name: str, folder: Path = PRESETS_DIR) -> None:
+    preset_file(name, folder).unlink(missing_ok=True)

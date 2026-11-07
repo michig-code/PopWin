@@ -94,7 +94,7 @@ def steps(ctx, app):
     check("Topbar auf keinem Monitor möglich", not tops())
     ctx.settings._fill_monitors()
     yield 200
-    boxes = [b.text() for b in ctx.settings.monitor_page.findChildren(QCheckBox) if "Hauptmonitor)" in b.text()]
+    boxes = [b.text() for b in ctx.settings.topbar_page.findChildren(QCheckBox) if "Hauptmonitor)" in b.text()]
     check("Einstellungen bieten Monitore zum Ankreuzen", len(boxes) == 2, str(boxes))
     config.set_bar_screens("topbar", "all", [])
     config.set_bar_screens("taskbar", "all", [])
@@ -104,11 +104,11 @@ def steps(ctx, app):
     # Die Einstellungsseite
     ctx.settings._fill_monitors()
     yield 200
-    groups = ctx.settings.monitor_page.findChildren(QComboBox)
-    buttons = [b for b in ctx.settings.monitor_page.findChildren(QPushButton)
+    groups = ctx.settings.topbar_page.findChildren(QComboBox)
+    buttons = [b for b in ctx.settings.topbar_page.findChildren(QPushButton)
                if b.text() == "Auf alle Monitore übertragen" and b.isEnabled()]
     check("Einstellungen zeigen jeden Monitor", len(buttons) >= count, f"{len(buttons)} Übertragen-Knöpfe")
-    ctx.settings.tabs.setCurrentWidget(ctx.settings.monitor_page)
+    ctx.settings.tabs.setCurrentWidget(ctx.settings.topbar_page)
     ctx.settings.apply_theme()
     ctx.settings.resize(760, 900)
     yield 300

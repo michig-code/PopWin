@@ -7,13 +7,18 @@ from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QObject, QPoint, Qt
 from PySide6.QtWidgets import QLabel, QMenu, QWidget
 
 
-def animation_duration(settings: dict) -> int:
-    return settings["duration"] if settings["enabled"] else 0
+def animation_duration(settings: dict, level: str = "balanced") -> int:
+    """Im Sparmodus gibt es keine Animationen, egal was unter Animationen steht."""
+    return settings["duration"] if settings["enabled"] and level != "saver" else 0
+
+
+def duration_of(config) -> int:
+    return animation_duration(config.get("animations"), config.get("performance.level", "balanced"))
 
 
 def fade_ghost(ctx, widget: QWidget) -> None:
     """Qt-Menüs verschwinden sofort; ein Standbild blendet an ihrer Stelle weich aus."""
-    duration = animation_duration(ctx.config.get("animations"))
+    duration = duration_of(ctx.config)
     if not duration or not widget.isVisible():
         return
     ghost = QLabel(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
@@ -61,6 +66,8 @@ class WindowAnimator(QObject):
         self._target = 1.0
         self._after: Callable[[], None] | None = None
         self.length = 0  # eigene Dauer statt der allgemeinen, aus bleibt aus
+        self._quick = 0  # Dauer nur für das laufende Ein- oder Ausblenden
+        self._hide = True
         self._animation = QVariantAnimation(self)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._animation.valueChanged.connect(self._step)
@@ -78,8 +85,9 @@ class WindowAnimator(QObject):
         self._shift(round((1 - value) * self._slide))
 
     def duration(self) -> int:
-        duration = animation_duration(self.ctx.config.get("animations"))
-        return self.length if duration and self.length else duration
+        duration = duration_of(self.ctx.config)
+        custom = self._quick or self.length
+        return custom if duration and custom else duration
 
     def _run(self, start: float, end: float) -> None:
         self._animation.stop()
@@ -88,21 +96,29 @@ class WindowAnimator(QObject):
         self._animation.setEndValue(end)
         self._animation.start()
 
-    def enter(self, target: float = 1.0, slide: int = 0) -> None:
+    def enter(self, target: float = 1.0, slide: int = 0, length: int = 0) -> None:
         self.closing = False
         self._after = None
+        self._quick = length
         self._target, self._slide = target, slide
         self._base = self.window.pos()
         if self.duration() == 0:
             self.window.setWindowOpacity(target)
             return
+        # Sofort durchsichtig, nicht erst mit dem ersten Animationsschritt: Sonst blitzt das Fenster
+        # einen Moment voll auf und kommt danach noch einmal herein.
+        self._animation.stop()
+        self._step(0.0)
         self._run(0.0, 1.0)
 
-    def leave(self, after: Callable[[], None] | None = None) -> None:
+    def leave(self, after: Callable[[], None] | None = None, hide: bool = True, length: int = 0) -> None:
+        """hide=False: Nur ausblenden, das Fenster bleibt offen und steht danach wieder voll da - `after` legt es vorher weg."""
         if self.closing or not self.window.isVisible():
             return
         self.closing = True
         self._after = after
+        self._hide = hide
+        self._quick = length
         running = self.running
         current = self._animation.currentValue() if running else 1.0
         if not running:  # mitten im Einblenden ist die aktuelle Lage noch verschoben, _base stimmt schon
@@ -116,9 +132,17 @@ class WindowAnimator(QObject):
         if not self.closing:
             return
         self.closing = False
+        after, self._after = self._after, None
+        if not self._hide:
+            # Erst wegräumen (etwa hinter das Spiel), dann wieder voll zeigen - sonst blitzte es vorn noch einmal auf.
+            self._hide = True
+            if after:
+                after()
+            self._shift(0)
+            self.window.setWindowOpacity(self._target)
+            return
         self.window.hide()
         self._shift(0)
         self.window.setWindowOpacity(self._target)
-        after, self._after = self._after, None
         if after:
             after()

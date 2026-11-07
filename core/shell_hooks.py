@@ -23,6 +23,7 @@ HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.L
 
 WH_KEYBOARD_LL, WH_MOUSE_LL = 13, 14
 WM_QUIT, WM_HOTKEY = 0x0012, 0x0312
+WM_PAUSE_MOUSE = 0x8000 + 0x51  # WM_APP: wParam 1 = Maus-Hook ab, 0 = wieder an
 WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
 WM_RBUTTONDOWN, WM_RBUTTONUP = 0x0204, 0x0205
 VK_S, VK_LWIN, VK_RWIN, VK_DUMMY = 0x53, 0x5B, 0x5C, 0xE8
@@ -93,6 +94,23 @@ class ShellHooks(QThread):
         self._thread_id = 0
         self._swallow_up = False
         self._uia = None
+        self._mouse_hook = None
+        self._mouse_proc = None
+        self._module = None
+        self.mouse_paused = False  # im Vollbild-Spiel: kein Maus-Hook, siehe pause_mouse
+
+    def pause_mouse(self, paused: bool) -> None:
+        """Nimmt den Maus-Hook weg, solange ein Vollbild-Spiel den Fokus hat.
+
+        Ein Low-Level-Maus-Hook läuft für jede Mausbewegung durch Python. Spiele mit 1000-Hz-Mäusen
+        (Fortnite) schicken tausend Bewegungen pro Sekunde, und jede wartet, bis Python frei ist -
+        die Maus ruckelt oder hängt. Den Desktop-Rechtsklick braucht man im Spiel ohnehin nicht.
+        """
+        if paused == self.mouse_paused:
+            return
+        self.mouse_paused = paused
+        if self._thread_id:
+            user32.PostThreadMessageW(self._thread_id, WM_PAUSE_MOUSE, int(paused), 0)
 
     def stop(self) -> None:
         if self._thread_id:
@@ -102,12 +120,12 @@ class ShellHooks(QThread):
     def run(self) -> None:
         self._thread_id = kernel32.GetCurrentThreadId()
         registered = self._register_hotkeys()
-        module = kernel32.GetModuleHandleW(None)
-        mouse_proc, key_proc = HOOKPROC(self._on_mouse), HOOKPROC(self._on_key)
+        module = self._module = kernel32.GetModuleHandleW(None)
+        self._mouse_proc, key_proc = HOOKPROC(self._on_mouse), HOOKPROC(self._on_key)
         hooks = []
         if self.desktop_menu:
             self._init_uia()
-            hooks.append(user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, module, 0))
+            self._set_mouse_hook(not self.mouse_paused)
         if self.override_win_s or self.remap_win_key:
             hooks.append(user32.SetWindowsHookExW(WH_KEYBOARD_LL, key_proc, module, 0))
 
@@ -116,13 +134,25 @@ class ShellHooks(QThread):
             if msg.message == WM_HOTKEY:
                 {HOTKEY_LAUNCHER: self.launcher_requested, HOTKEY_KILL: self.kill_requested,
                  HOTKEY_NOVA: self.nova_requested}[msg.wParam].emit()
+            elif msg.message == WM_PAUSE_MOUSE and self.desktop_menu:
+                self._set_mouse_hook(not self.mouse_paused)  # der neueste Stand zählt, nicht die Reihenfolge der Meldungen
 
+        self._set_mouse_hook(False)
         for hook in hooks:
             if hook:
                 user32.UnhookWindowsHookEx(hook)
         for hotkey_id in registered:
             user32.UnregisterHotKey(None, hotkey_id)
         self._release_uia()
+
+    def _set_mouse_hook(self, on: bool) -> None:
+        """Nur im Hook-Thread aufrufen: Windows bindet den Hook an den Thread, der ihn setzt."""
+        if on and not self._mouse_hook:
+            self._mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._mouse_proc, self._module, 0) or None
+        elif not on and self._mouse_hook:
+            user32.UnhookWindowsHookEx(self._mouse_hook)
+            self._mouse_hook = None
+            self._swallow_up = False  # ein halber Rechtsklick darf nach dem Spiel nicht hängen bleiben
 
     def _release_uia(self) -> None:
         # COM-Objekte gehören diesem Thread und müssen hier freigegeben werden, nicht beim

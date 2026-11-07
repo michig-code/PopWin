@@ -418,7 +418,9 @@ class NovaPanel(PopupPanel):
         left = settings["side"] == "left"
         x = area.left() + EDGE_GAP if left else area.right() - settings["width"] - EDGE_GAP + 1
         self.move(x, area.top() + EDGE_GAP)
-        if settings["reserve_space"] and settings["keep_open"]:
+        # Über einem Spiel oder Video keinen Platz reservieren: Windows passt sonst maximierte Vollbild-Fenster
+        # an den kleineren Arbeitsbereich an, und das Spiel rutscht unter die Topbar.
+        if settings["reserve_space"] and settings["keep_open"] and not win_api.fullscreen_on(native_rect(screen)):
             hwnd = int(self.winId())
             win_api.appbar_register(hwnd, SPACE_MESSAGE)
             self._reserved = True

@@ -387,7 +387,7 @@ class SearchLauncher(ThemedWindow):
         self._fit_height()
 
     def _ask(self, prompt: str) -> None:
-        if self.ctx.config.get("nova.from_search") and self.ctx.nova.installed:
+        if self.ctx.config.get("nova.from_search") and self.ctx.nova.installed and self.ctx.nova_enabled():
             self.dismiss()
             self.ctx.nova.ask(prompt)
             return

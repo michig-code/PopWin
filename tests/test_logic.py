@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from win32com.client import Dispatch
 
 from config.config_manager import DEFAULTS, ConfigManager, _merge
+from core import theme_maker
 from core import win_api
 from core.app_index import App, AppIndex
 from core.media_controller import RECONNECT_AFTER, MediaController
@@ -180,7 +181,7 @@ for _name, _stub in (("appbar_register", lambda *a: None), ("appbar_remove", lam
                      ("appbar_set_pos", lambda hwnd, edge, monitor, thickness, current=None: tuple(monitor)),
                      ("force_foreground", lambda *a: None), ("set_zorder", lambda *a: None), ("move_desktop_icon", lambda *a: None),
                      ("desktop_command", lambda *a: None), ("send_keys", lambda *a: None), ("own_by_desktop", lambda *a: True),
-                     ("shell_open", lambda *a: True)):  # kein Test startet je ein echtes Programm, eine Datei oder Webseite
+                     ("shell_open", lambda *a: True), ("watch_foreground", lambda callback: 0)):  # kein Test startet je ein echtes Programm, eine Datei oder Webseite
     setattr(win_api, _name, _stub)
 
 
@@ -201,6 +202,8 @@ class ResetContext(popwin_main.PopWinApp):
         self.config.data["nova"]["reserve_space"] = False  # sonst schrumpfte jeder Test den echten Arbeitsbereich
         self.nova.log = ChatLog(folder / "chat.json")
         self.wallpaper.sync = lambda: None  # ein Test darf nie echte Programme wie Wallpaper Engine starten oder beenden
+        self.trimmer.run = lambda: []  # „Windows entlasten“ beendet in Tests nie ein echtes Programm
+        theme_maker.CUSTOM_DIR = folder / "themes"  # eigene Themes nie in den echten Datenordner
         CONTEXTS.append(self)
 
 
@@ -420,11 +423,13 @@ class QuietStart(unittest.TestCase):
             part.start = lambda *a: None
         ctx.desktop_groups.sync = lambda: None
         with unittest.mock.patch.object(win_api, "ensure_start_menu_entry"), unittest.mock.patch.object(win_api, "move_autostart_link"), \
-                unittest.mock.patch("main.QTimer.singleShot"):
+                unittest.mock.patch("main.QTimer.singleShot") as later:
             ctx.start()
-            self.assertEqual(opened, [True])
-            ctx.start()  # jeder weitere Start: nichts
-        self.assertEqual(opened, [True])
+            setups = lambda: [c for c in later.call_args_list if c.args[-1] == ctx.show_setup]
+            self.assertEqual(len(setups()), 1)  # ab 4.0: der animierte Setup-Bildschirm statt der Einstellungsseite
+            ctx.start()  # jeder weitere Start: keine Einrichtung mehr, höchstens „Was ist neu“
+            self.assertEqual(len(setups()), 1)
+        self.assertEqual(opened, [])
 
     def test_second_start_and_restart_open_nothing(self):
         source = (ROOT_PATH / "main.py").read_text(encoding="utf-8")
@@ -1942,6 +1947,22 @@ class Languages(unittest.TestCase):
         i18n.load("es")
         self.assertEqual(i18n.translate("Das gibt es nicht"), "Das gibt es nicht")
 
+    def test_texts_of_version_4_are_translated(self):
+        try:
+            i18n.load("en")
+            self.assertEqual(i18n.translate("Allgemein"), "General")
+            self.assertEqual(i18n.translate("Neon-Nacht"), "Neon Night")
+            self.assertEqual(i18n.translate("Mikrofon 40 %"), "Microphone 40 %")
+            self.assertEqual(i18n.translate("Gerade aktiv: Discord"), "In use by: Discord")
+            self.assertEqual(i18n.translate("Super! Nova sitzt in der Taskbar und kommt mit Strg + Alt + N."),
+                             "Great! Nova sits in the taskbar and comes up with Strg + Alt + N.")
+            i18n.load("es")
+            self.assertEqual(i18n.translate("Eingabegeräte"), "Dispositivos de entrada")
+            i18n.load("fr")
+            self.assertEqual(i18n.translate("Was ist neu?"), "Quoi de neuf ?")
+        finally:
+            i18n.load("de")
+
     def test_every_language_has_every_text(self):
         keys = set(json.loads((ROOT_PATH / "assets" / "lang" / "en.json").read_text(encoding="utf-8")))
         for code in ("es", "fr"):
@@ -2370,6 +2391,19 @@ class NovaSpace(unittest.TestCase):
         self.panel = self.ctx.nova_panel
         self.ctx.config.data["nova"]["reserve_space"] = True
         self.panel.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        no_game = unittest.mock.patch.object(win_api, "fullscreen_on", return_value=False)  # ein echtes Spiel ändert nichts
+        no_game.start()
+        self.addCleanup(no_game.stop)
+
+    def test_no_reservation_over_a_fullscreen_game(self):
+        self.ctx.config.data["nova"]["keep_open"] = True
+        with unittest.mock.patch.object(win_api, "fullscreen_on", return_value=True), \
+                unittest.mock.patch.object(win_api, "appbar_register") as register, \
+                unittest.mock.patch.object(win_api, "appbar_set_pos") as place:
+            self.panel._place()
+        register.assert_not_called()
+        place.assert_not_called()
+        self.assertFalse(self.panel._reserved)
 
     def test_nova_reserves_her_side_and_gives_it_back(self):
         with unittest.mock.patch.object(win_api, "appbar_register") as register, \
@@ -2459,8 +2493,7 @@ class WinKeyHook(unittest.TestCase):
 class TileThemes(unittest.TestCase):
     """Die Kachel-Stile: Jedes Taskbar-Icon in einer eigenen Kachel, abschaltbar und auch für andere Stile."""
 
-    TILED = ("tiles_glass", "tiles_obsidian", "tiles_nova", "tiles_frost", "tiles_neon", "tiles_amber",
-             "tiles_graphite", "tiles_ocean", "glass_clear", "glass_rose", "glass_emerald", "glass_prism", "glass_smoke", "glass_liquid")
+    TILED = ("tiles_obsidian", "tiles_frost", "tiles_graphite", "glass_clear", "glass_smoke")
 
     def test_all_eight_are_offered_and_saved(self):
         from config.config_manager import THEMES
@@ -2483,14 +2516,14 @@ class TileThemes(unittest.TestCase):
     def test_tiles_can_be_switched_on_and_off(self):
         ctx = ResetContext()
         plain = ctx.theme.stylesheet("liquid_glass")
-        tiled = ctx.theme.stylesheet("tiles_nova")
+        tiled = ctx.theme.stylesheet("tiles_obsidian")
         ctx.theme.set_tile_mode("on")
         self.assertTrue(ctx.theme.tiles("liquid_glass"))
         self.assertIn("#Bar #TaskButton", ctx.theme.stylesheet("liquid_glass"))
-        self.assertEqual(ctx.theme.stylesheet("tiles_nova"), tiled)
+        self.assertEqual(ctx.theme.stylesheet("tiles_obsidian"), tiled)
         ctx.theme.set_tile_mode("off")
-        self.assertFalse(ctx.theme.tiles("tiles_nova"))
-        self.assertTrue(ctx.theme.stylesheet("tiles_nova").endswith(theme_manager.TILES_OFF))
+        self.assertFalse(ctx.theme.tiles("tiles_obsidian"))
+        self.assertTrue(ctx.theme.stylesheet("tiles_obsidian").endswith(theme_manager.TILES_OFF))
         self.assertEqual(ctx.theme.stylesheet("liquid_glass"), plain)
         ctx.theme.set_tile_mode("kaputt")
         self.assertEqual(ctx.theme.tile_mode, "off")
@@ -2499,7 +2532,7 @@ class TileThemes(unittest.TestCase):
     def test_fully_round_tiles_only_where_tiles_are(self):
         ctx = ResetContext()
         ctx.theme.set_tile_shape("round")
-        self.assertTrue(ctx.theme.stylesheet("tiles_ocean").endswith(theme_manager.TILES_ROUND))
+        self.assertTrue(ctx.theme.stylesheet("tiles_frost").endswith(theme_manager.TILES_ROUND))
         self.assertNotIn(theme_manager.TILES_ROUND, ctx.theme.stylesheet("pop_basic"))
         ctx.theme.set_tile_mode("on")
         self.assertTrue(ctx.theme.stylesheet("pop_basic").endswith(theme_manager.TILES_ROUND))
@@ -2507,7 +2540,7 @@ class TileThemes(unittest.TestCase):
         self.assertEqual(ctx.theme.tile_shape, "round")
         ctx.theme.set_tile_shape("theme")
         ctx.theme.set_tile_mode("theme")
-        self.assertNotIn(theme_manager.TILES_ROUND, ctx.theme.stylesheet("tiles_ocean"))
+        self.assertNotIn(theme_manager.TILES_ROUND, ctx.theme.stylesheet("tiles_frost"))
 
     def test_every_tile_style_has_its_own_look(self):
         ctx = ResetContext()
@@ -2727,9 +2760,275 @@ class WebApps(unittest.TestCase):
         self.assertEqual(len(dock._buttons["crunchyroll.lnk"].windows), 1)
 
 
+class FullscreenGaming(unittest.TestCase):
+    """Win-Taste, Zurück ins Spiel, Arbeitsbereich und Maus-Hook, solange ein Vollbild läuft."""
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        self.dock.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.dock._registered = True
+        self.dock._fullscreen = True
+        self.dock._on_top = False
+        self.addCleanup(self.dock.hide)
+
+    def test_win_key_slides_the_bar_in_like_the_home_menu(self):
+        with unittest.mock.patch.object(win_api, "set_zorder") as order, unittest.mock.patch.object(self.dock, "_fade_in") as fade:
+            self.dock.peek()
+        fade.assert_called_once()
+        self.assertEqual(order.call_args[0][1], win_api.HWND_TOPMOST)
+        self.assertTrue(self.dock._on_top)
+        self.assertGreater(self.dock._hide_at, time.monotonic())  # Auto-Hide nimmt sie nicht gleich wieder weg
+
+    def test_bar_is_see_through_before_it_comes_forward(self):
+        seen = []
+        with unittest.mock.patch.object(win_api, "set_zorder", side_effect=lambda hwnd, after: seen.append(self.dock.windowOpacity())):
+            self.dock.peek()
+        self.assertEqual(seen, [0.0])  # kein Aufblitzen über dem Spiel
+        self.assertEqual(self.dock.animator.duration(), base.QUICK_MS)
+
+    def test_back_into_the_game_glides_out_quickly(self):
+        self.dock.show()
+        self.dock._on_top = True
+        with unittest.mock.patch.object(win_api, "set_zorder") as order,                 unittest.mock.patch.object(self.dock, "_keeps_open", return_value=False):
+            self.dock._place_in_z()
+            self.assertTrue(self.dock.animator.closing)
+            self.assertEqual(self.dock.animator.duration(), base.QUICK_MS)
+            order.assert_not_called()  # erst nach dem Hinausgleiten hinter das Spiel
+            self.dock.animator._animation.stop()
+            self.dock.animator._done()
+        self.assertEqual(order.call_args[0][1], win_api.HWND_BOTTOM)
+        self.assertTrue(self.dock.isVisible())  # bleibt für die Zeit nach dem Spiel
+        self.assertEqual(self.dock.windowOpacity(), 1.0)
+
+    def test_called_back_while_gliding_out_stays_in_front(self):
+        self.dock.show()
+        self.dock._on_top = True
+        with unittest.mock.patch.object(win_api, "set_zorder") as order,                 unittest.mock.patch.object(self.dock, "_keeps_open", return_value=False):
+            self.dock._place_in_z()
+            self.dock.peek()
+            self.dock.animator._done()  # die alte Ausblendung meldet sich nicht mehr
+        self.assertNotIn(win_api.HWND_BOTTOM, [call[0][1] for call in order.call_args_list])
+
+    def test_home_menu_is_quick_in_a_game_and_normal_otherwise(self):
+        self.ctx.bars = [self.dock]
+        self.ctx.config.set("start_menu.win_key", "home")
+        with unittest.mock.patch.object(self.ctx, "_home_dock", return_value=self.dock),                 unittest.mock.patch.object(self.dock, "show_then"), unittest.mock.patch.object(self.dock, "peek"):
+            self.ctx._on_win_key()
+            self.assertEqual(self.ctx.start_menu.animator.length, base.QUICK_MS)
+            self.dock._fullscreen = False
+            self.ctx._on_win_key()
+            self.assertEqual(self.ctx.start_menu.animator.length, 0)
+
+    def test_bars_come_right_after_the_home_menu(self):
+        self.ctx.bars = [self.dock]
+        self.ctx.config.set("start_menu.win_key", "home")
+        order = []
+        with unittest.mock.patch.object(self.ctx, "_home_dock", return_value=self.dock),                 unittest.mock.patch.object(self.dock, "show_then", side_effect=lambda action: order.append("menu")),                 unittest.mock.patch.object(self.dock, "peek", side_effect=lambda: order.append("bar")):
+            self.ctx._on_win_key()
+        self.assertEqual(order, ["menu", "bar"])  # Menü und Leisten starten gemeinsam
+
+    def test_menu_and_bars_leave_together_when_clicking_into_the_game(self):
+        bar = unittest.mock.MagicMock()
+        self.ctx.bars = [bar]
+        with unittest.mock.patch.object(self.ctx.start_menu, "dismiss") as dismiss:
+            self.ctx.start_menu._deactivated()
+        dismiss.assert_called_once()
+        bar.release_if_game_in_front.assert_called_once()
+
+    def test_release_only_when_the_game_has_focus(self):
+        with unittest.mock.patch.object(win_api, "foreground_window", return_value=1234),                 unittest.mock.patch.object(self.dock, "release_to_game") as release:
+            with unittest.mock.patch.object(win_api, "fullscreen_window_on", return_value=False):
+                self.dock.release_if_game_in_front()
+            release.assert_not_called()
+            with unittest.mock.patch.object(win_api, "fullscreen_window_on", return_value=True):
+                self.dock.release_if_game_in_front()
+            release.assert_called_once()
+
+    def test_peek_without_fullscreen_does_not_animate(self):
+        self.dock._fullscreen = False
+        self.dock._on_top = True
+        with unittest.mock.patch.object(self.dock, "_fade_in") as fade:
+            self.dock.peek()
+        fade.assert_not_called()
+
+    def test_click_into_the_game_releases_the_bar_at_once(self):
+        self.dock._on_top = True
+        self.dock._peek_until = time.monotonic() + 10  # mitten im Hereinschauen
+        with unittest.mock.patch.object(win_api, "fullscreen_window_on", return_value=True), \
+                unittest.mock.patch.object(win_api, "set_zorder") as order, \
+                unittest.mock.patch.object(self.dock, "_keeps_open", return_value=False):
+            self.dock._on_foreground(1234)
+        self.assertEqual(order.call_args[0][1], win_api.HWND_BOTTOM)
+        self.assertFalse(self.dock._on_top)
+        self.assertEqual(self.dock._peek_until, 0.0)
+
+    def test_auto_hide_bar_leaves_when_the_game_gets_focus(self):
+        self.dock._revealed = True
+        with unittest.mock.patch.object(self.dock, "auto_hides", return_value=True), \
+                unittest.mock.patch.object(win_api, "fullscreen_window_on", return_value=True), \
+                unittest.mock.patch.object(self.dock.animator, "leave") as leave:
+            self.dock._on_foreground(1234)
+        leave.assert_called_once()
+        self.assertFalse(self.dock._revealed)
+
+    def test_other_window_only_triggers_a_normal_check(self):
+        with unittest.mock.patch.object(win_api, "fullscreen_window_on", return_value=False), \
+                unittest.mock.patch.object(self.dock, "_check_fullscreen") as check, \
+                unittest.mock.patch.object(self.dock, "release_to_game") as release:
+            self.dock._on_foreground(1234)
+        check.assert_called_once()
+        release.assert_not_called()
+
+    def test_closing_menu_no_longer_holds_the_bar(self):
+        panel = unittest.mock.MagicMock()
+        panel.isVisible.return_value = True
+        panel.animator.closing = True
+        topbar = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        with unittest.mock.patch.object(base.PopupPanel, "_open_panel", panel):
+            self.assertFalse(topbar._keeps_open())
+            panel.animator.closing = False
+            self.assertTrue(topbar._keeps_open())
+        menu = unittest.mock.MagicMock(anchor=self.dock.start)
+        menu.isVisible.return_value = True
+        menu.animator.closing = True
+        with unittest.mock.patch.object(self.ctx, "start_menu", menu):
+            self.assertFalse(self.dock._keeps_open())  # Home-Menü blendet nach dem Klick ins Spiel gerade aus
+            menu.animator.closing = False
+            self.assertTrue(self.dock._keeps_open())
+
+    def test_no_work_area_change_while_fullscreen(self):
+        self.dock._rect = (0, 1000, 1920, 1080)
+        with unittest.mock.patch.object(win_api, "appbar_set_pos", return_value=(0, 1000, 1920, 1080)) as place:
+            self.dock.reposition()
+            place.assert_not_called()
+            self.assertTrue(self.dock._reposition_later)
+            with unittest.mock.patch.object(win_api, "fullscreen_on", return_value=False):
+                self.dock._check_fullscreen()  # Spiel zu: jetzt nachholen
+            place.assert_called_once()
+        self.assertFalse(self.dock._reposition_later)
+
+    def test_popwin_start_over_a_game_takes_no_space_yet(self):
+        self.dock._rect = None  # erstes Andocken, etwa beim (Neu-)Start von PopWin mitten in Valorant
+        with unittest.mock.patch.object(win_api, "appbar_set_pos", return_value=(0, 1000, 1920, 1080)) as place:
+            self.dock.reposition()
+            place.assert_not_called()
+            self.assertIsNotNone(self.dock._area)  # steht trotzdem schon an ihrem Rand
+            self.assertTrue(self.dock._reposition_later)
+            with unittest.mock.patch.object(win_api, "fullscreen_on", return_value=False):
+                self.dock._check_fullscreen()  # Spiel zu: jetzt erst Platz nehmen
+            place.assert_called_once()
+
+    def test_docking_checks_for_a_game_first(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        dock.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.addCleanup(dock.undock)
+        with unittest.mock.patch.object(win_api, "fullscreen_on", return_value=True),                 unittest.mock.patch.object(win_api, "appbar_set_pos") as place:
+            dock.dock()
+        place.assert_not_called()
+        self.assertTrue(dock._fullscreen)
+
+    def test_docking_without_a_game_takes_its_space(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        dock.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.addCleanup(dock.undock)
+        with unittest.mock.patch.object(win_api, "fullscreen_on", return_value=False),                 unittest.mock.patch.object(win_api, "appbar_set_pos", return_value=(0, 1000, 1920, 1080)) as place:
+            dock.dock()
+        place.assert_called()
+
+    def test_game_focus_pauses_the_mouse_hook(self):
+        hooks = unittest.mock.MagicMock()
+        self.ctx.hooks = hooks
+        with unittest.mock.patch.object(win_api, "is_fullscreen_window", return_value=True):
+            self.ctx._on_foreground(1234)
+        hooks.pause_mouse.assert_called_with(True)
+        with unittest.mock.patch.object(win_api, "is_fullscreen_window", return_value=False):
+            self.ctx._on_foreground(5678)
+        hooks.pause_mouse.assert_called_with(False)
+        self.ctx.hooks = None
+
+    def test_monitor_change_waits_for_the_game_to_end(self):
+        with unittest.mock.patch.object(win_api, "foreground_is_fullscreen", return_value=True), \
+                unittest.mock.patch.object(self.ctx, "rebuild_bars") as rebuild:
+            self.ctx._screens_settled()
+        rebuild.assert_not_called()
+        self.assertTrue(self.ctx._screens_timer.isActive())
+        self.ctx._screens_timer.stop()
+        with unittest.mock.patch.object(win_api, "foreground_is_fullscreen", return_value=False), \
+                unittest.mock.patch.object(self.ctx, "rebuild_bars") as rebuild:
+            self.ctx._screens_settled()
+        rebuild.assert_called_once_with(recreate=True)
+
+
+class AnimatorNoFlash(unittest.TestCase):
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.window = QWidget()
+        self.window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.window.show()
+        self.addCleanup(self.window.hide)
+        self.animator = WindowAnimator(self.ctx, self.window)
+
+    def test_enter_is_see_through_right_away(self):
+        self.window.setWindowOpacity(1.0)
+        self.animator.enter(1.0, slide=8)
+        self.assertEqual(self.window.windowOpacity(), 0.0)
+
+    def test_quick_length_counts_only_once(self):
+        self.animator.enter(1.0, length=90)
+        self.assertEqual(self.animator.duration(), 90)
+        self.animator.leave()
+        self.assertEqual(self.animator.duration(), 220)
+
+    def test_leave_without_hiding_puts_away_first(self):
+        self.ctx.config.data["animations"]["enabled"] = False
+        seen = []
+        self.window.setWindowOpacity(0.0)
+        self.animator._target = 1.0
+        self.animator.leave(lambda: seen.append(self.window.windowOpacity()), hide=False)
+        self.assertEqual(seen, [0.0])  # noch unsichtbar, während es weggelegt wird
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(self.window.windowOpacity(), 1.0)
+
+
+class MouseHookPause(unittest.TestCase):
+    """Nur die Logik: Kein echter Hook wird gesetzt, keine Meldung erreicht Windows."""
+
+    def setUp(self):
+        self.hooks = ShellHooks("alt+space", True, False, True)
+
+    def test_pause_posts_only_on_change(self):
+        self.hooks._thread_id = 42
+        with unittest.mock.patch.object(win_api.user32, "PostThreadMessageW") as post:
+            self.hooks.pause_mouse(True)
+            self.hooks.pause_mouse(True)
+            self.hooks.pause_mouse(False)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args_list[0][0][2], 1)
+
+    def test_pause_before_start_only_remembers(self):
+        with unittest.mock.patch.object(win_api.user32, "PostThreadMessageW") as post:
+            self.hooks.pause_mouse(True)
+        post.assert_not_called()
+        self.assertTrue(self.hooks.mouse_paused)
+
+    def test_unhook_and_hook_again(self):
+        with unittest.mock.patch.object(win_api.user32, "SetWindowsHookExW", return_value=7) as hook, \
+                unittest.mock.patch.object(win_api.user32, "UnhookWindowsHookEx") as unhook:
+            self.hooks._set_mouse_hook(True)
+            self.hooks._set_mouse_hook(True)  # kein zweiter Hook
+            hook.assert_called_once()
+            self.hooks._swallow_up = True
+            self.hooks._set_mouse_hook(False)
+            unhook.assert_called_once_with(7)
+        self.assertIsNone(self.hooks._mouse_hook)
+        self.assertFalse(self.hooks._swallow_up)
+
+
 class WinKeyInFullscreen(unittest.TestCase):
     def _bar(self):
         ctx = ResetContext()
+        ctx.config.data["animations"]["enabled"] = False  # ohne Animation liegt die Leiste sofort wieder hinter dem Spiel
         dock = Dock(ctx, QGuiApplication.primaryScreen(), "bottom")
         dock._fullscreen = True
         dock._on_top = False
@@ -2766,6 +3065,54 @@ class WinKeyInFullscreen(unittest.TestCase):
             ctx._on_win_key()
         peek.assert_called_once()
         dock.hide()
+
+
+class RestartDuringAGame(unittest.TestCase):
+    """Ein Neustart gibt die Windows-Taskleiste nicht kurz zurück: Sie schöbe ein laufendes Spiel nach oben."""
+
+    def test_restart_keeps_the_native_taskbar_hidden(self):
+        ctx = ResetContext()
+        ctx._taskbar_hidden = True
+        ctx.restart_requested = True
+        with unittest.mock.patch.object(ctx, "_restore_native_taskbar") as restore:
+            ctx.shutdown()
+        restore.assert_not_called()
+
+    def test_normal_exit_still_gives_it_back(self):
+        ctx = ResetContext()
+        ctx._taskbar_hidden = True
+        with unittest.mock.patch.object(ctx, "_restore_native_taskbar") as restore:
+            ctx.shutdown()
+        restore.assert_called_once()
+
+    def _apply(self, ctx):
+        ctx._started = True
+        screen = QGuiApplication.primaryScreen()
+        with unittest.mock.patch.object(ctx, "_wanted_bars", return_value={("m", Dock, "bottom"): (screen, Dock, "")}),                 unittest.mock.patch.object(ctx, "_start_watchdog"), unittest.mock.patch.object(win_api, "hide_native_taskbar"),                 unittest.mock.patch.object(win_api, "taskbar_state", return_value=1):
+            ctx._apply_native_taskbar()
+        ctx._taskbar_guard.stop()
+
+    def test_new_popwin_keeps_the_real_saved_state(self):
+        ctx = ResetContext()
+        ctx.config.set("shell.saved_taskbar_state", 0, notify=False)  # vom alten PopWin, die Leiste ist noch versteckt
+        self._apply(ctx)
+        self.assertEqual(ctx.config.get("shell.saved_taskbar_state"), 0)  # nicht der Auto-Hide-Wert 1
+
+    def test_first_start_saves_the_state(self):
+        ctx = ResetContext()
+        ctx.config.set("shell.saved_taskbar_state", None, notify=False)
+        self._apply(ctx)
+        self.assertEqual(ctx.config.get("shell.saved_taskbar_state"), 1)
+
+    def test_watchdog_sees_the_new_popwin(self):
+        from core import taskbar_watchdog
+        pid_file = Path(tempfile.mkdtemp()) / "popwin.pid"
+        with unittest.mock.patch.object(taskbar_watchdog, "PID_FILE", pid_file):
+            self.assertFalse(taskbar_watchdog.successor_running(1))  # keine Datei
+            pid_file.write_text(str(os.getpid()), encoding="ascii")
+            self.assertTrue(taskbar_watchdog.successor_running(1))
+            self.assertFalse(taskbar_watchdog.successor_running(os.getpid()))  # das ist das alte selbst
+            self.assertFalse(taskbar_watchdog.wait_for_successor(os.getpid(), wait=0))
 
 
 class AutostartAndSessionEnd(unittest.TestCase):
@@ -5025,8 +5372,8 @@ class TaskbarOptions(unittest.TestCase):
         host = self.ctx.settings.taskbar_monitors
         titles = [box.title() for box in host.findChildren(QGroupBox)]
         self.assertTrue(all(any(name in title for title in titles) for name in ("Elemente", "Apps", "Größe")))
-        monitor_titles = [box.text() for box in self.ctx.settings.monitor_page.findChildren(QCheckBox)]
-        self.assertNotIn("Papierkorb anzeigen", monitor_titles)
+        topbar_titles = [box.text() for box in self.ctx.settings.topbar_page.findChildren(QCheckBox)]
+        self.assertNotIn("Papierkorb anzeigen", topbar_titles)
         texts = [box.text() for box in host.findChildren(QCheckBox)]
         for label in ("Papierkorb anzeigen", "Player anzeigen", "Suche anzeigen", "Home-Knopf anzeigen"):
             self.assertIn(label, texts)
@@ -5058,11 +5405,11 @@ class MonitorPage(unittest.TestCase):
         entries = window._monitor_entries()
         self.assertEqual([entry.number for entry in entries], sorted(entry.number for entry in entries))
         self.assertTrue(ctx.config.synced)
-        window._pick_monitor(entries[-1].key)
+        window._pick_topbar_monitor(entries[-1].key)
         self.assertFalse(ctx.config.synced)
         window._fill_monitors()
-        titles = [box.title() for box in window.monitor_page.findChildren(QGroupBox) if not box.isHidden() or True]
-        self.assertIn(entries[-1].title, titles)
+        titles = [box.title() for box in window.topbar_monitors.findChildren(QGroupBox)]
+        self.assertIn(f"Bildschirm · Bildschirm {entries[-1].number}", titles)
 
     def test_taskbar_page_shows_the_picked_monitor(self):
         ctx = ResetContext()
@@ -5101,7 +5448,7 @@ class MonitorPage(unittest.TestCase):
     def test_all_screens_switch_is_on_every_page(self):
         ctx = ResetContext()
         window = ctx.settings
-        for page in (window.monitor_page, window.topbar_page, window.taskbar_page):
+        for page in (window.topbar_page, window.taskbar_page):
             labels = [box.text() for box in page.findChildren(QCheckBox)]
             self.assertIn("Alle Bildschirme gleichzeitig einstellen", labels)
         window._switch_mode("separate")
@@ -6117,6 +6464,962 @@ class AppSearchRanking(unittest.TestCase):
         launcher._accept()
         self.assertEqual(executed, [3])
 # --- [Antigravity Ende: App-Suchranking & Claude-Knopf Tests] ---
+
+
+class FriendIdeas(unittest.TestCase):
+    """Ideen aus der Leiste eines Freundes: Sprachanzeige, Projizieren, Ausschneiden, rote Zahlen, schwebendes Dock,
+    Benutzer-Bereich, richtige Ecken, Einstellungs-Presets."""
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.windows = lambda: []
+        self.key = screen_key(QGuiApplication.primaryScreen())
+
+    def set(self, field, value):
+        self.ctx.config.set_monitor(self.key, field, value)
+
+    # --- Topbar ---
+    def test_language_short_names(self):
+        from ui.topbar import language_label
+        self.assertEqual(win_api.language_id(0x04070407), 0x0407)
+        self.assertEqual(win_api.language_id(None), 0)
+        self.assertEqual(win_api.language_short(0x0407), "DEU")
+        self.assertEqual(win_api.language_short(0x0409), "ENU")
+        self.assertEqual(win_api.language_short(0), "")
+        self.assertEqual(language_label("DEU", 2), "DEU")
+        self.assertEqual(language_label("DEU", 1), "")  # nur eine Tastatur: nichts umzuschalten
+        self.assertEqual(language_label("", 3), "")
+
+    def test_new_topbar_items_follow_their_settings(self):
+        bar = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        order = complete_order([])
+        for item in ("lang", "project", "snip"):
+            self.assertIn(item, TOP_ITEMS)
+            self.assertIn(item, order)
+        for field, widget in (("show_project", bar.project), ("show_snip", bar.snip)):
+            self.set(field, False)
+            self.assertTrue(widget.isHidden(), field)
+            self.set(field, True)
+            self.assertFalse(widget.isHidden(), field)
+        with unittest.mock.patch.object(win_api, "foreign_foreground", return_value=1234), \
+                unittest.mock.patch.object(win_api, "keyboard_language", return_value=0x0407), \
+                unittest.mock.patch.object(win_api, "keyboard_language_count", return_value=2):
+            bar._update_language()
+            self.assertEqual(bar.lang.text(), "DEU")
+            self.assertFalse(bar.lang.isHidden())
+            self.set("show_language", False)
+            self.assertTrue(bar.lang.isHidden())
+        bar.close()
+
+    def test_language_click_targets_the_window_before(self):
+        bar = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        bar._lang_window = 4321
+        with unittest.mock.patch.object(win_api, "next_keyboard_language", return_value=True) as switch:
+            bar.lang.click()
+        switch.assert_called_once_with(4321)
+        bar.close()
+
+    def test_project_and_snip_open_windows_tools(self):
+        opened = []
+        with unittest.mock.patch.object(win_api, "shell_open", side_effect=lambda target, *a: opened.append(target) or True):
+            win_api.open_projection()
+            win_api.open_snipping()
+        self.assertEqual(opened, ["ms-settings-displays-topology:projection", "ms-screenclip:"])
+        opened.clear()
+        with unittest.mock.patch.object(win_api, "shell_open", side_effect=lambda target, *a: opened.append(target) and False):
+            win_api.open_projection()
+        self.assertEqual(opened, ["ms-settings-displays-topology:projection", "DisplaySwitch.exe"])
+
+    # --- Rote Zahlen am Icon ---
+    def notice(self, app_id, number=1):
+        return Notice(number, app_id, "Titel", "", datetime.now().astimezone())
+
+    def test_badges_match_notices_to_apps(self):
+        from core.notifications import app_tail, badge_count, badge_text, notice_belongs
+        self.assertEqual(app_tail("com.squirrel.Discord.Discord"), "discord")
+        self.assertEqual(app_tail(r"C:\Programme\Steam\steam.exe"), "steam")
+        self.assertTrue(notice_belongs("com.squirrel.Discord.Discord", "discord.exe", r"C:\x\Discord.exe", ""))
+        mail = "microsoft.windowscommunicationsapps_8wekyb3d8bbwe!microsoft.windowslive.mail"
+        self.assertTrue(notice_belongs(mail, "mail", "shell:AppsFolder\\" + mail, ""))
+        self.assertTrue(notice_belongs("Some.App.Id", "x.exe", "", "Gmail", "gmail"))
+        self.assertFalse(notice_belongs("com.squirrel.Discord.Discord", "steam.exe", "", "Steam", "discord"))
+        notices = [self.notice("com.squirrel.Discord.Discord", n) for n in range(12)]
+        self.assertEqual(badge_count(notices, "discord.exe", "", "", {}), 12)
+        self.assertEqual([badge_text(0), badge_text(3), badge_text(12)], ["", "3", "9+"])
+
+    def test_dock_shows_and_hides_badges(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        self.ctx.config.set("taskbar.pinned", [{"name": "Discord", "target": r"C:\Apps\Discord.exe"}])
+        self.ctx.notifications.notices = [self.notice("com.squirrel.Discord.Discord")]
+        badge = lambda: next(b for k, b in dock._buttons.items() if "discord" in k.lower()).badge  # force baut Knöpfe neu
+        dock.refresh(force=True)
+        self.assertEqual(badge(), "1")
+        next(iter(dock._buttons.values())).grab()  # zeichnet den roten Punkt ohne Fehler
+        self.ctx.config.set("notifications.hidden", [1])  # weggeklickt
+        dock.refresh()
+        self.assertEqual(badge(), "")
+        self.ctx.config.set("notifications.hidden", [])
+        dock.refresh()
+        self.assertEqual(badge(), "1")
+        self.set("task_badges", False)
+        dock.refresh()
+        self.assertEqual(badge(), "")
+        dock.close()
+
+    # --- Schwebendes Dock ---
+    def test_floating_dock_is_a_round_pill_with_a_gap(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        dock.resize(600, 54)
+        self.assertFalse(dock.floating())
+        self.set("dock_floating", True)
+        self.set("dock_gap", 14)
+        dock.resize(600, 54)
+        self.assertTrue(dock.floating() and dock._fits_content() and dock.paints_backdrop())
+        self.assertEqual(dock.bar_margin(), 14)
+        self.assertEqual(dock.corner_radius(), min(dock.height(), dock.width()) // 2)
+        self.assertIn("transparent", dock.root.styleSheet())
+        dock.grab()
+        self.set("dock_floating", False)
+        self.assertEqual(dock.root.styleSheet(), "")
+        dock.close()
+
+    # --- Ecken ---
+    def test_round_styles_get_no_square_windows_corners(self):
+        self.assertTrue(base.uses_native_backdrop({"corner": "0"}))
+        self.assertTrue(base.uses_native_backdrop({"corner": "8"}))
+        self.assertFalse(base.uses_native_backdrop({"corner": "24"}))
+        self.ctx.config.set("theme", "tiles_graphite")
+        panel = QuickPanel(self.ctx, "")
+        with unittest.mock.patch.object(win_api, "set_blur") as blur, \
+                unittest.mock.patch.object(win_api, "set_rounded") as rounded:
+            panel.apply_theme()
+            self.assertEqual(blur.call_args.args[1], "none")
+            self.assertFalse(rounded.call_args.args[1])
+            panel.theme_name = "liquid_glass"
+            panel.apply_theme()
+            self.assertNotEqual(blur.call_args.args[1], "none")  # Stile mit kleinen Ecken behalten den Blur
+        panel.close()
+
+    # --- Benutzer-Bereich ---
+    def test_account_helpers(self):
+        from core import accounts
+        self.assertEqual(accounts.initials("Michael Gans"), "MG")
+        self.assertEqual(accounts.initials("micha"), "M")
+        self.assertEqual(accounts.initials(""), "?")
+        entries = [{"name": "Michi", "flags": accounts.UF_NORMAL_ACCOUNT, "full_name": "Michael"},
+                   {"name": "Anna", "flags": accounts.UF_NORMAL_ACCOUNT},
+                   {"name": "Gast", "flags": accounts.UF_NORMAL_ACCOUNT},
+                   {"name": "Alt", "flags": accounts.UF_NORMAL_ACCOUNT | accounts.UF_ACCOUNTDISABLE},
+                   {"name": "WDAGUtilityAccount", "flags": accounts.UF_NORMAL_ACCOUNT}]
+        self.assertEqual([a.label for a in accounts.visible_accounts(entries)], ["Anna", "Michael"])
+
+    def test_user_name_opens_the_account_panel(self):
+        from ui.account_panel import AccountPanel, avatar_pixmap
+        from core import accounts
+        self.assertFalse(avatar_pixmap("Anna", "", 26).isNull())
+        bar = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        fake = [accounts.Account("Anna"), accounts.Account(accounts.login_name())]
+        with unittest.mock.patch.object(accounts, "local_accounts", return_value=fake), \
+                unittest.mock.patch.object(accounts, "account_picture", return_value=""), \
+                unittest.mock.patch.object(AccountPanel, "toggle_at", lambda self, anchor, prepare=None: prepare()), \
+                unittest.mock.patch.object(accounts, "switch_user") as switch, \
+                unittest.mock.patch.object(win_api, "sign_out") as sign_out:
+            bar._user_clicked()
+            panel = bar._account_popup
+            self.assertIsInstance(panel, AccountPanel)
+            self.assertEqual(panel.list_box.count(), 2)
+            panel._sign_out()
+            sign_out.assert_not_called()  # erst beim zweiten Klick
+            self.assertEqual(panel.sign_out.text(), "Wirklich abmelden?")
+            switch.assert_not_called()
+        with unittest.mock.patch.object(bar, "_show_window_menu") as windows:
+            self.set("user_click", "windows")
+            bar._user_clicked()
+            windows.assert_called_once()
+        bar.close()
+
+    # --- Einstellungen ---
+    def test_no_monitor_page_any_more(self):
+        window = self.ctx.settings
+        labels = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+        self.assertNotIn("Monitore", labels)
+        self.assertIn("Teilen & Presets", labels)
+        for host in (window.topbar_monitors, window.taskbar_monitors):
+            titles = [box.title() for box in host.findChildren(QGroupBox)]
+            self.assertTrue(any(t.startswith("Bildschirm") for t in titles), titles)
+            self.assertTrue(any("anzeigen auf" in t for t in titles), titles)
+
+    def test_shared_settings_leave_private_things_out(self):
+        from config import config_manager as cm
+        data = self.ctx.config.data
+        data["nova"]["connections"] = {"Mail": {"fields": ["x"]}}
+        data["wallpaper"]["file"] = r"C:\privat.png"
+        data["theme"] = "tiles_graphite"
+        shared = cm.shareable(data)
+        for key in cm.PRIVATE_KEYS:
+            self.assertNotIn(key, shared)
+        self.assertNotIn("connections", shared["nova"])
+        self.assertNotIn("file", shared["wallpaper"])
+        self.assertEqual(shared["theme"], "tiles_graphite")
+        self.assertIn("connections", data["nova"])  # das Original bleibt heil
+        other = json.loads(json.dumps(data))
+        other["theme"] = "pop_basic"
+        other["nova"]["connections"] = {}
+        merged = cm.apply_shared(other, shared)
+        self.assertEqual(merged["theme"], "tiles_graphite")
+        self.assertEqual(merged["nova"]["connections"], {})  # eigene Verbindungen bleiben
+        self.assertEqual(cm.apply_shared(other, {"theme": 5})["theme"], "pop_basic")  # falscher Typ zählt nicht
+
+    def test_presets_and_files(self):
+        from config import config_manager as cm
+        folder = Path(tempfile.mkdtemp())
+        self.assertEqual(cm.preset_file('Ga:me*', folder).name, "Game.json")
+        with self.assertRaises(ValueError):
+            cm.preset_file("  ", folder)
+        self.ctx.config.set("theme", "tiles_graphite")
+        cm.save_preset(self.ctx.config, "Gaming", folder)
+        self.assertEqual(cm.list_presets(folder), ["Gaming"])
+        self.ctx.config.set("theme", "pop_basic")
+        changes = []
+        self.ctx.config.changed.connect(changes.append)
+        self.assertEqual(cm.import_settings(self.ctx.config, cm.preset_file("Gaming", folder)), "Gaming")
+        self.assertEqual(self.ctx.config.get("theme"), "tiles_graphite")
+        self.assertIn("monitors", changes)
+        saved = json.loads(self.ctx.config.path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["theme"], "tiles_graphite")
+        with self.assertRaises(ValueError):
+            cm.read_document('{"format": "etwas anderes"}')
+        with self.assertRaises(ValueError):
+            cm.read_document("kein json")
+        cm.delete_preset("Gaming", folder)
+        self.assertEqual(cm.list_presets(folder), [])
+
+class PowerAndBeta(unittest.TestCase):
+    """Sparsam im Spiel, Icon-Vergrößerung, Tray-Raster, weniger Stile und das neue Einstellungsmenü."""
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.windows = lambda: []
+        self.key = screen_key(QGuiApplication.primaryScreen())
+
+    def test_bars_rest_behind_a_game(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        top = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        dock._fullscreen = top._fullscreen = True
+        dock._on_top = top._on_top = False
+        self.assertTrue(dock.behind_game() and top.behind_game())
+        with unittest.mock.patch.object(dock, "visible_pins") as pins, \
+                unittest.mock.patch.object(win_api, "foreground_title") as title:
+            dock.refresh()
+            top._tick()
+        pins.assert_not_called()  # kein Abgleich, solange niemand die Taskbar sieht
+        title.assert_not_called()
+        dock._on_top = True
+        self.assertFalse(dock.behind_game())
+        dock.close()
+        top.close()
+
+    def test_popups_restyle_only_when_needed(self):
+        panel = QuickPanel(self.ctx, "")
+        panel.apply_theme()
+        with unittest.mock.patch.object(panel, "setStyleSheet") as restyle:
+            panel.apply_theme()
+            restyle.assert_not_called()  # gleicher Stil: nichts neu aufbauen, das Home-Menü öffnet schneller
+        self.ctx.config.set("mode", "light", notify=False)
+        with unittest.mock.patch.object(panel, "setStyleSheet") as restyle:
+            panel.apply_theme()
+            restyle.assert_called_once()
+        self.ctx.config.set("mode", "dark", notify=False)
+        panel.close()
+
+    def test_magnify_curve(self):
+        from ui.taskbar import MAGNIFY_TOP, magnify_scale
+        self.assertAlmostEqual(magnify_scale(0, 100), MAGNIFY_TOP)
+        self.assertEqual(magnify_scale(100, 100), 1.0)
+        self.assertEqual(magnify_scale(500, 100), 1.0)
+        self.assertGreater(magnify_scale(20, 100), magnify_scale(60, 100))
+        self.assertEqual(magnify_scale(10, 0), 1.0)
+
+    def test_magnify_is_beta_and_off_by_default(self):
+        self.assertFalse(DEFAULTS["taskbar"]["magnify"])
+        labels = [box.text() for box in self.ctx.settings.findChildren(QCheckBox)]
+        self.assertIn("Taskbar-Icons wachsen unter der Maus (wie am Mac)", labels)
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        dock.start_magnify()
+        self.assertFalse(dock._magnify_timer.isActive())
+        self.ctx.config.set("taskbar.magnify", True)
+        dock.start_magnify()
+        self.assertTrue(dock._magnify_timer.isActive())
+        dock._magnify()  # Maus ist nicht auf dem Dock: alles normal groß, Timer hört auf
+        self.assertFalse(dock._magnify_timer.isActive())
+        dock.close()
+
+    def test_tray_arrow_opens_the_windows_menu_like_before(self):
+        top = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        with unittest.mock.patch.object(win_api, "open_tray_overflow") as keys, \
+                unittest.mock.patch.object(win_api, "tray_overflow_window", return_value=0):
+            top._tray_was_open = False
+            top._toggle_tray()
+            app.processEvents()
+        keys.assert_called_once()  # wie in 3.8.5: Win+B öffnet das Fenster von Windows
+        with unittest.mock.patch.object(win_api, "tray_overflow_window", return_value=4711), \
+                unittest.mock.patch.object(win_api, "close_tray_overflow") as close:
+            top._tray_was_open = True
+            top._toggle_tray()
+        close.assert_called_once()  # zweiter Klick schließt es wieder
+        self.assertFalse(hasattr(top, "_tray_popup"))  # kein eigenes PopWin-Raster
+        top.close()
+
+    def test_fewer_styles_and_old_ones_move_on(self):
+        from config.config_manager import THEMES, migrate_themes
+        for name in ("liquid_glass", "pop_basic", "clean", "minimalist"):  # die Originale bleiben
+            self.assertIn(name, THEMES)
+            self.assertIn(name, PRESETS)
+        self.assertEqual(set(THEMES), set(PRESETS))
+        for name in PRESETS:
+            self.assertTrue((ROOT_PATH / "themes" / f"{name}.qss").exists(), name)
+        data = {"theme": "tiles_nova", "launcher": {"theme": "glass_rose"}, "context_menu": {"theme": ""},
+                "monitor_shared": {"theme": "tiles_ocean"}, "monitors": {"a": {"theme": "glass_liquid"}}}
+        migrate_themes(data)
+        self.assertEqual((data["theme"], data["launcher"]["theme"], data["monitor_shared"]["theme"],
+                          data["monitors"]["a"]["theme"], data["context_menu"]["theme"]),
+                         ("tiles_obsidian", "glass_clear", "tiles_frost", "liquid_glass", ""))
+        path = Path(tempfile.mkdtemp()) / "settings.json"
+        path.write_text(json.dumps({"theme": "tiles_neon"}), encoding="utf-8")
+        self.assertEqual(ConfigManager(path).data["theme"], "tiles_graphite")
+
+    def test_new_settings_menu_groups_the_pages(self):
+        from ui.settings_window import grouped_nav
+        rows = grouped_nav(["Themes", "Topbar", "Neu", "Beta"])
+        self.assertEqual(rows[0], ("Aussehen", True))
+        self.assertIn(("Neu", False), rows)  # Unbekanntes landet unter der letzten Gruppe
+        self.assertEqual(rows[-2:], [("Beta", False), ("Neu", False)])
+        window = self.ctx.settings
+        nav = window.tabs.nav
+        visible = lambda: [nav.item(r).text() for r in range(nav.count()) if not nav.item(r).isHidden()]
+        self.assertIn("AUSSEHEN", visible())  # ab 4.0 ist das neue Menü Standard
+        self.ctx.config.set("settings_v2", False)
+        self.assertNotIn("Übersicht", visible())  # klassisch: ohne Übersicht und ohne Überschriften
+        self.assertNotIn("AUSSEHEN", visible())
+        self.ctx.config.set("settings_v2", True)
+        self.assertIn("Übersicht", visible())
+        self.assertIn("AUSSEHEN", visible())
+        self.assertEqual(window.tabs.currentIndex(), window.overview_tab)
+        window.open_named("Taskbar")
+        self.assertIs(window.tabs.currentWidget(), window.taskbar_page)
+        self.assertEqual(window.tabs.tabText(window.overview_tab), "Übersicht")
+        self.ctx.config.set("settings_v2", False)
+        self.assertNotIn("Übersicht", visible())
+        window.hide()
+
+
+class ThemesAndPower(unittest.TestCase):
+    """Eigene Themes, Neon-Nacht, Nova abschalten, Leistungsstufe, Windows entlasten und das Aufploppen."""
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.windows = lambda: []
+        self.folder = Path(tempfile.mkdtemp())
+
+    def test_theme_from_a_few_values(self):
+        qss = theme_maker.render(theme_maker.NEON_SPEC)
+        self.assertNotIn("@", qss)  # jeder Platzhalter ist ersetzt
+        self.assertIn("corner=18", qss)
+        self.assertIn("#FF2FB3", qss)
+        self.assertIn('QMenu[popMode="light"]::item:selected', qss)
+        light = theme_maker.render(dict(theme_maker.DEFAULT_SPEC, bg="#F4F4F8", bg2="#FFFFFF"))
+        self.assertIn("color: #14171D", light.split("\n")[2])  # heller Hintergrund, dunkle Schrift
+        file = (ROOT_PATH / "themes" / "neon_night.qss").read_text(encoding="utf-8")
+        self.assertEqual(file, qss)  # die Datei ist genau das, was der Editor erzeugt
+
+    def test_bad_values_are_cleaned(self):
+        spec = theme_maker.clean_spec({"name": "", "accent": "rot", "alpha": 5, "corner": "x", "glow": 400})
+        self.assertEqual(spec["accent"], theme_maker.DEFAULT_SPEC["accent"])
+        self.assertEqual((spec["alpha"], spec["corner"], spec["glow"]), (35, theme_maker.DEFAULT_SPEC["corner"], 100))
+        self.assertEqual(spec["name"], theme_maker.DEFAULT_SPEC["name"])
+
+    def test_custom_themes_are_saved_listed_and_shared(self):
+        name = theme_maker.save_spec(dict(theme_maker.DEFAULT_SPEC, name="Mein Grün", accent="#00FF88"), folder=self.folder)
+        self.assertEqual(name, "custom_mein_gruen")
+        again = theme_maker.save_spec(dict(theme_maker.DEFAULT_SPEC, name="Mein Grün"), folder=self.folder)
+        self.assertEqual(again, "custom_mein_gruen_2")  # gleicher Name überschreibt nichts
+        self.assertEqual(theme_maker.list_custom(self.folder), {name: "Mein Grün", again: "Mein Grün"})
+        self.assertEqual(theme_maker.load_spec(name, self.folder)["accent"], "#00FF88")
+        shared = self.folder / "x.popwin-theme"
+        theme_maker.export_spec(theme_maker.load_spec(name, self.folder), shared)
+        self.assertEqual(theme_maker.read_shared(shared)["accent"], "#00FF88")
+        (self.folder / "kaputt.popwin-theme").write_text('{"format": "etwas anderes"}', encoding="utf-8")
+        with self.assertRaises(ValueError):
+            theme_maker.read_shared(self.folder / "kaputt.popwin-theme")
+        theme_maker.delete_spec(again, self.folder)
+        self.assertNotIn(again, theme_maker.list_custom(self.folder))
+
+    def test_custom_theme_can_be_chosen_and_survives_a_restart(self):
+        name = theme_maker.save_spec(dict(theme_maker.DEFAULT_SPEC, name="Pink"))
+        self.assertIn(name, self.ctx.theme.all_themes())
+        self.ctx.theme.set_theme(name)
+        self.assertEqual(self.ctx.theme.current, name)
+        self.assertIn("corner=18", self.ctx.theme.stylesheet())
+        self.ctx.config.save()
+        self.assertEqual(ConfigManager(self.ctx.config.path).data["theme"], name)
+        self.ctx.theme.set_theme("custom_gibtsnicht")
+        self.assertEqual(self.ctx.theme.current, name)  # Unbekanntes wird nicht übernommen
+
+    def test_themes_page_has_gallery_and_editor(self):
+        window = self.ctx.settings
+        window.open_named("Themes")
+        page = window.theme_page
+        names = [card.name for card in page.cards]
+        self.assertIn("neon_night", names)
+        self.assertIn("liquid_glass", names)
+        page._choose("neon_night")
+        self.assertEqual(self.ctx.theme.current, "neon_night")
+        self.assertTrue(next(card for card in page.cards if card.name == "neon_night").isChecked())
+        page._set("accent", "#123456")
+        self.assertIn("#123456", page.preview.styleSheet())  # Live-Vorschau ohne Speichern
+        self.assertEqual(self.ctx.theme.current, "neon_night")
+        page._save(new=True)
+        self.assertTrue(theme_maker.is_custom(self.ctx.theme.current))
+        self.assertIn(self.ctx.theme.current, [card.name for card in page.cards])
+
+    def test_nova_can_hide_in_the_settings(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        top = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        self.assertTrue(self.ctx.nova_enabled())
+        self.ctx.config.set("nova.enabled", False)
+        self.assertFalse(self.ctx.nova_enabled())
+        self.assertTrue(dock.nova.isHidden() and top.nova.isHidden())
+        self.ctx.config.set("nova.enabled", True)
+        self.assertEqual(top.nova.isHidden(), not top.option("show_nova"))
+        dock.close()
+        top.close()
+
+    def test_saver_level_turns_off_animations(self):
+        from ui.animation import animation_duration, duration_of
+        self.assertEqual(animation_duration({"enabled": True, "duration": 200}, "saver"), 0)
+        self.assertEqual(animation_duration({"enabled": True, "duration": 200}, "balanced"), 200)
+        self.ctx.config.set("performance.level", "saver")
+        self.assertEqual(duration_of(self.ctx.config), 0)
+        self.ctx.config.set("taskbar.magnify", True)
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        self.assertFalse(dock.magnifies())  # im Sparmodus keine Vergrößerung
+        dock.close()
+
+    def test_windows_trim_only_hits_chosen_names(self):
+        from core import process_trim
+        self.assertEqual(process_trim.wanted_names({}), set())
+        names = process_trim.wanted_names({"widgets": True})
+        self.assertEqual(names, {"widgets.exe", "widgetservice.exe"})
+
+        class Fake:
+            def __init__(self, pid, name, session=1):
+                self.pid, self.info = pid, {"name": name, "session": session}
+        processes = [Fake(1, "Widgets.exe"), Fake(2, "explorer.exe"), Fake(3, "widgets.exe", session=0), Fake(99, "widgets.exe")]
+        found = process_trim.matching(processes, names, 1, own_pid=99)
+        self.assertEqual([p.pid for p in found], [1])  # nicht fremde Sitzung, nicht PopWin selbst, nichts anderes
+        self.assertTrue(process_trim.PROTECTED.isdisjoint(n for c in process_trim.CANDIDATES for n in c.processes))
+        with unittest.mock.patch("psutil.process_iter") as walk:
+            self.assertEqual(process_trim.trim({}), [])
+        walk.assert_not_called()  # ohne Haken wird nicht einmal nachgesehen
+
+
+
+class DockMoves(unittest.TestCase):
+    """Feste Knöpfe der Taskbar per Drag-and-drop umstellen und Icons, die schon beim Näherkommen wachsen."""
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.windows = lambda: []
+        self.key = screen_key(QGuiApplication.primaryScreen())
+
+    def test_order_is_cleaned(self):
+        from ui.taskbar import FIXED_KEYS, dock_order_of
+        self.assertEqual(dock_order_of(None), list(FIXED_KEYS))
+        order = dock_order_of(["trash", "apps", "quatsch", "trash"])
+        self.assertEqual(sorted(order), sorted(FIXED_KEYS))
+        self.assertLess(order.index("trash"), order.index("apps"))
+
+    def test_nearness_from_above(self):
+        from ui.taskbar import nearness
+        bar = (0, 1000, 1000, 1040)
+        near = lambda x, y, edge="bottom": nearness(x, y, *bar, edge, 60, 40)
+        self.assertEqual(near(500, 1020), 1.0)
+        self.assertAlmostEqual(near(500, 970), 0.5)  # halbe Zone über der Leiste
+        self.assertEqual(near(500, 900), 0.0)
+        self.assertEqual(near(1200, 1020), 0.0)  # weit neben der Leiste
+        self.assertEqual(near(500, 1045), 1.0)  # unter der schwebenden Pille
+        self.assertGreater(near(500, 985), near(500, 960))  # je näher, desto größer
+        self.assertGreater(near(500, 1060, "top"), 0)  # oben liegende Leiste: von unten kommend
+
+    def test_fixed_buttons_follow_the_saved_order(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        row = dock.root.layout()
+        self.assertLess(row.indexOf(dock.start), row.indexOf(dock.trail))  # Start links neben den Apps
+        self.ctx.config.set_monitor(self.key, "dock_order", ["search", "apps", "start", "media", "nova", "trash", "desktop"])
+        self.assertGreater(row.indexOf(dock.start), row.indexOf(dock.trail))  # jetzt rechts
+        self.assertLess(row.indexOf(dock.search), row.indexOf(dock.trail))
+        dock.close()
+
+    def test_dragging_a_fixed_button_saves_the_new_place(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        dock.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.ctx.config.set_monitor(self.key, "show_desktop", True)
+        dock.show()
+        dock.root.layout().activate()
+        dock._fixed_drag = "desktop"
+        dock._fixed_grab = QPoint(0, 0)
+        far_left = dock.root.mapToGlobal(QPoint(-400, 5))
+        dock._drag_fixed(dock.desktop, far_left)
+        self.assertEqual(dock._fixed_order[0], "desktop")
+        dock._finish_fixed(dock.desktop)
+        self.assertEqual(self.ctx.config.monitor(self.key)["dock_order"][0], "desktop")
+        self.assertEqual(dock._fixed_drag, "")
+        dock.close()
+
+    def test_magnify_watches_the_approach_only_when_on(self):
+        dock = Dock(self.ctx, QGuiApplication.primaryScreen(), "bottom")
+        self.assertFalse(dock._approach_timer.isActive())  # aus: keine Arbeit
+        self.ctx.config.set("taskbar.magnify", True)
+        self.assertTrue(dock._approach_timer.isActive())
+        self.ctx.config.set("performance.level", "saver")
+        self.assertFalse(dock._approach_timer.isActive())
+        dock.close()
+
+
+class IntroScreens(unittest.TestCase):
+    """Animierte Einrichtung und „Was ist neu“ nach einem Update."""
+    LOG = """# Änderungen
+
+## 4.0.0
+
+- **Themes:** eigene Kategorie mit Editor. Noch mehr Text, der nicht in den Stichpunkt gehört.
+- Taskbar: Icons lassen sich ziehen
+
+## 3.8.5
+
+- Explorer: KI-gestützte Dateisortierung mit interaktiver Vorschau, Ordner-Verschiebung (mit Strg+Z Rückgängig) und virtueller Themen-Gruppierung
+
+## 3.8.4
+
+- alt
+"""
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.windows = lambda: []
+
+    def test_changelog_in_short_points(self):
+        from ui.intro_screens import changelog_sections, sections_since, short_point
+        sections = changelog_sections(self.LOG)
+        self.assertEqual([version for version, _points in sections], ["4.0.0", "3.8.5", "3.8.4"])
+        self.assertEqual([v for v, _p in sections_since(sections, "3.8.4")], ["4.0.0", "3.8.5"])
+        self.assertEqual([v for v, _p in sections_since(sections, "")], ["4.0.0"])  # Vorversion unbekannt: nur die neueste
+        self.assertEqual(sections_since(sections, "4.0.0"), [])
+        self.assertEqual(short_point(sections[0][1][0]), "Themes: eigene Kategorie mit Editor")
+        long = short_point(sections[1][1][0])
+        self.assertLessEqual(len(long), 96)
+        self.assertEqual(long, "Explorer: KI-gestützte Dateisortierung mit interaktiver Vorschau, Ordner-Verschiebung")  # an natürlicher Stelle gekürzt
+
+    def test_whats_new_shows_once_per_version(self):
+        from ui import intro_screens
+        with unittest.mock.patch.object(intro_screens.WhatsNew, "present") as present:
+            self.ctx.config.set("updates.seen", "3.0")
+            self.assertTrue(self.ctx.show_whats_new())
+            self.assertFalse(self.ctx.show_whats_new())  # beim nächsten Start nicht noch einmal
+            self.assertTrue(self.ctx.show_whats_new(force=True))  # über die Einstellungen jederzeit
+        self.assertEqual(present.call_count, 2)
+        self.ctx._news.close()
+
+    def test_setup_walks_through_and_nova_can_hide(self):
+        from ui.intro_screens import SetupWizard
+        wizard = SetupWizard(self.ctx)
+        wizard.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.assertEqual(len(wizard.pages), len(SetupWizard.STEPS))
+        self.assertFalse(wizard.back.isVisibleTo(wizard))
+        wizard._next()
+        self.assertEqual(wizard.index, 1)
+        wizard._pick_theme("neon_night")
+        self.assertEqual(self.ctx.theme.current, "neon_night")
+        self.assertTrue(next(c for c in wizard.theme_cards if c.name == "neon_night").isChecked())
+        wizard._pick_dock("float")
+        self.assertTrue(self.ctx.config.monitor(None)["dock_floating"])
+        self.assertEqual(wizard.dock_kind(), "float")
+        wizard._nova(False)
+        self.assertFalse(self.ctx.nova_enabled())
+        self.assertTrue(wizard.nova_choice.isHidden())  # die Knöpfe sind weg
+        self.assertIn("Einstellungen", wizard.nova_answer.text())
+        wizard._pick_power("saver")
+        self.assertEqual(self.ctx.config.get("performance.level"), "saver")
+        wizard.go(len(wizard.pages) - 1)
+        self.assertEqual(wizard.next.text(), "PopWin starten")
+        with unittest.mock.patch.object(win_api, "set_autostart") as autostart:
+            wizard._finish()
+        autostart.assert_not_called()  # ohne Haken kein Autostart
+        wizard.close()
+
+    def test_setup_is_still_in_the_settings(self):
+        window = self.ctx.settings
+        with unittest.mock.patch.object(self.ctx, "show_setup") as setup:
+            buttons = [b for b in window.findChildren(QPushButton) if b.text() == "Einrichtung erneut starten"]
+            self.assertEqual(len(buttons), 1)
+            buttons[0].click()
+        setup.assert_called_once()
+
+
+class NoFlashingWindows(unittest.TestCase):
+    """Früher war jedes Icon der Topbar und jede Kachel der Schnelleinstellungen kurz ein eigenes kleines Fenster."""
+
+    def test_no_stray_button_windows(self):
+        from PySide6.QtCore import QObject
+        from PySide6.QtWidgets import QAbstractButton
+        shown = []
+
+        class Spy(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+                    shown.append(type(obj).__name__ if isinstance(obj, QAbstractButton) else "")
+                return False
+        spy = Spy()
+        QApplication.instance().installEventFilter(spy)
+        try:
+            ctx = ResetContext()
+            ctx.windows = lambda: []
+            top = TopBar(ctx, QGuiApplication.primaryScreen(), "top")
+            dock = Dock(ctx, QGuiApplication.primaryScreen(), "bottom")
+            top._show_quick()
+            QApplication.processEvents()
+        finally:
+            QApplication.instance().removeEventFilter(spy)
+        self.assertEqual([name for name in shown if name], [])
+        top._quick_popup.hide()
+        top.close()
+        dock.close()
+
+
+class StartVariants(unittest.TestCase):
+    """Verschiedene Aussehen des Home-Menüs, mit Vorschau in den Einstellungen."""
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.windows = lambda: []
+
+    def test_columns_per_variant(self):
+        from ui.start_menu import variant_columns, variant_of
+        self.assertEqual(variant_columns("list", 4, 6), 1)
+        self.assertEqual(variant_columns("tiles", 4, 6), 3)
+        self.assertEqual(variant_columns("strip", 4, 12), 8)
+        self.assertEqual(variant_columns("grid", 5, 6), 5)
+        self.assertEqual(variant_of({"layout": "quatsch"}), "grid")
+
+    def test_menu_builds_every_variant(self):
+        from ui.start_menu import VARIANTS
+        menu = self.ctx.start_menu
+        for key in VARIANTS:
+            self.ctx.config.set("start_menu.layout", key)
+            menu._rebuild()
+            self.assertEqual(menu.search_bar.isVisibleTo(menu), key == "search", key)
+            self.assertEqual(menu.grid.count(), len(self.ctx.config.get("start_menu.pinned")), key)
+        self.ctx.config.set("start_menu.layout", "list")
+        menu._rebuild()
+        self.assertEqual({menu.grid.getItemPosition(i)[1] for i in range(menu.grid.count())}, {0})  # alles in einer Spalte
+
+    def test_settings_preview_cards(self):
+        window = self.ctx.settings
+        self.assertEqual([card.key for card in window.start_cards], ["grid", "list", "tiles", "strip", "search"])
+        window._pick_start_variant("tiles")
+        self.assertEqual(self.ctx.config.get("start_menu.layout"), "tiles")
+        self.assertTrue(next(c for c in window.start_cards if c.key == "tiles").isChecked())
+        self.assertIn("Drei", window.start_hint.text())
+
+
+class BarDesignerTests(unittest.TestCase):
+    """Symbole von Topbar und Taskbar in einer kleinen Vorschau-Leiste an/aus schalten und umsortieren."""
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.windows = lambda: []
+        self.key = screen_key(QGuiApplication.primaryScreen())
+
+    @staticmethod
+    def mouse(kind, x, buttons=Qt.MouseButton.LeftButton):
+        from PySide6.QtGui import QMouseEvent
+        point = QPointF(x, 40)
+        button = Qt.MouseButton.LeftButton if kind != QEvent.Type.MouseMove else Qt.MouseButton.NoButton
+        return QMouseEvent(kind, point, point, button, buttons, Qt.KeyboardModifier.NoModifier)
+
+    def center_of(self, designer, key):
+        item = next(i for i in designer.items if i.key == key)
+        from ui.bar_designer import SLOT
+        return designer._shown_x[key] + item.wide * SLOT / 2
+
+    def test_click_toggles_and_drag_reorders_taskbar_buttons(self):
+        designer = self.ctx.settings._dock_designer(self.key)
+        designer.resize(700, 100)
+        x = self.center_of(designer, "trash")
+        designer.mousePressEvent(self.mouse(QEvent.Type.MouseButtonPress, x))
+        designer.mouseReleaseEvent(self.mouse(QEvent.Type.MouseButtonRelease, x, Qt.MouseButton.NoButton))
+        self.assertFalse(self.ctx.config.monitor(self.key)["show_recycle"])  # Klick: aus
+        apps = self.center_of(designer, "apps")
+        designer.mousePressEvent(self.mouse(QEvent.Type.MouseButtonPress, apps))
+        designer.mouseReleaseEvent(self.mouse(QEvent.Type.MouseButtonRelease, apps, Qt.MouseButton.NoButton))
+        self.assertTrue(all(i.on for i in designer.items if i.key == "apps"))  # die Apps lassen sich nicht abschalten
+        start = self.center_of(designer, "start")
+        designer.mousePressEvent(self.mouse(QEvent.Type.MouseButtonPress, start))
+        for step in range(1, 30):
+            designer.mouseMoveEvent(self.mouse(QEvent.Type.MouseMove, start + step * 25))
+        designer.mouseReleaseEvent(self.mouse(QEvent.Type.MouseButtonRelease, start + 29 * 25, Qt.MouseButton.NoButton))
+        order = self.ctx.config.monitor(self.key)["dock_order"]
+        self.assertGreater(order.index("start"), order.index("apps"))  # Start steht jetzt rechts der Apps
+        self.assertTrue(self.ctx.config.monitor(self.key)["show_start"])  # Ziehen schaltet nichts aus
+
+    def test_topbar_designer_writes_order_and_visibility(self):
+        designer = self.ctx.settings._top_designer(self.key)
+        designer.resize(900, 100)
+        first = designer.items[0].key
+        x = self.center_of(designer, first)
+        designer.mousePressEvent(self.mouse(QEvent.Type.MouseButtonPress, x))
+        for step in range(1, 40):
+            designer.mouseMoveEvent(self.mouse(QEvent.Type.MouseMove, x + step * 25))
+        designer.mouseReleaseEvent(self.mouse(QEvent.Type.MouseButtonRelease, x + 39 * 25, Qt.MouseButton.NoButton))
+        order = self.ctx.config.monitor(self.key)["top_order"]
+        self.assertNotEqual(order[0], first)
+        self.assertEqual(sorted(order), sorted(set(order)))  # nichts doppelt
+
+
+class DevMenuHelpers(unittest.TestCase):
+    """Dev-Menü: Fehler klar benennen und Changelogs mit PopWin KI umschreiben (ohne echte KI-Anfrage)."""
+
+    def test_error_lines_find_the_reason(self):
+        from devtools.menu import error_lines
+        lines = ["Baue …", "ok", "Traceback (most recent call last):", '  File "build.py"', "ValueError: kaputt"]
+        self.assertEqual(error_lines(lines), ["Traceback (most recent call last):", "ValueError: kaputt"])
+        self.assertEqual(error_lines(["eins", "zwei", ""]), ["eins", "zwei"])  # ohne Fehlerwort: das Ende der Ausgabe
+        self.assertEqual(len(error_lines([f"error {n}" for n in range(30)])), 8)
+
+    def test_rewrite_prompt_and_cleanup(self):
+        from devtools.menu import REWRITE_PRESETS, clean_list, rewrite_prompt
+        system, content = rewrite_prompt("- Neu: Themes", "Mit Emojis", "lustig")
+        self.assertIn("Markdown-Liste", system)
+        self.assertIn(REWRITE_PRESETS["Mit Emojis"], content)
+        self.assertIn("Wunsch: lustig", content)
+        self.assertIn("- Neu: Themes", content)
+        self.assertEqual(clean_list("Klar:\n```markdown\n* Eins\n- Zwei\n```"), "- Eins\n- Zwei")
+
+    def test_worker_reports_failures_kindly(self):
+        from devtools.menu import RewriteWorker
+        from core import gemini_client
+        worker = RewriteWorker("schluessel", ["m"], "s", "c")
+        got = []
+        worker.failed.connect(got.append)
+        worker.done.connect(got.append)
+        with unittest.mock.patch.object(gemini_client, "generate", side_effect=RuntimeError("weg")):
+            worker.run()  # direkt, ohne Thread und ohne Netz
+        self.assertEqual(len(got), 1)
+        with unittest.mock.patch.object(gemini_client, "generate", return_value=("- a\n- b", "m")):
+            worker.run()
+        self.assertEqual(got[-1], "- a\n- b")
+
+
+class ClaudeButtonSize(unittest.TestCase):
+    def test_claude_button_is_as_big_as_home(self):
+        from ui.claude_button import ClaudeButton
+        ctx = ResetContext()
+        ctx.windows = lambda: []
+        dock = Dock(ctx, QGuiApplication.primaryScreen(), "bottom")
+        claude = dock.claude or ClaudeButton(ctx)
+        if claude.parent() is None:
+            dock.root.layout().insertWidget(0, claude)
+        dock.apply_theme()
+        dock.root.ensurePolished()
+        claude.ensurePolished()
+        dock.start.ensurePolished()
+        self.assertEqual(claude.sizeHint(), dock.start.sizeHint())  # gleiche Größe und Hover-Fläche wie Home
+        self.assertEqual(claude.objectName(), dock.start.objectName())
+        dock.close()
+
+
+class SettingsMenuDefault(unittest.TestCase):
+    def test_new_menu_is_switched_on_once_for_old_settings(self):
+        path = Path(tempfile.mkdtemp()) / "settings.json"
+        path.write_text(json.dumps({"settings_v2": False}), encoding="utf-8")
+        config = ConfigManager(path)
+        self.assertTrue(config.get("settings_v2"))  # 3.x hatte „aus“ gespeichert, ab 4.0 ist es an
+        config.set("settings_v2", False)
+        config.save()
+        self.assertFalse(ConfigManager(path).get("settings_v2"))  # wer es danach selbst ausschaltet, behält das
+
+class TopbarAndAudioExtras(unittest.TestCase):
+    """Eingabegeräte, Mikrofon-Fenster, Topbar-Symbole verschieben, Rechtsklick, Nicht stören, Theme in der Übersicht."""
+    OUT = [system_status.AudioOutput("a", "Lautsprecher (Razer Kraken V4 X)", True),
+           system_status.AudioOutput("b", "Lautsprecher (7.1 Surround Sound)", False)]
+    IN = [system_status.AudioOutput("m1", "Mikrofon (HyperX QuadCast S)", True),
+          system_status.AudioOutput("m2", "Mikrofon (Razer Kraken V4 X)", False)]
+
+    def setUp(self):
+        self.ctx = ResetContext()
+        self.ctx.windows = lambda: []
+        self.key = screen_key(QGuiApplication.primaryScreen())
+
+    def test_microphone_names_get_short(self):
+        self.assertEqual(self.IN[0].name, "HyperX QuadCast S")
+
+    def test_switch_bar_shows_outputs_then_inputs(self):
+        from ui.audio_outputs import AudioDevices
+        with unittest.mock.patch("core.system_status.audio_outputs", return_value=self.OUT), \
+                unittest.mock.patch("core.system_status.audio_inputs", return_value=self.IN):
+            view = AudioDevices(4)
+            view.refresh()
+            self.assertEqual(view.title(), "Ausgabegeräte")
+            self.assertIn("Razer", view.lists["out"].item(0).text())
+            self.assertFalse(view.lists["out"].isHidden())
+            view.buttons["in"].click()
+            self.assertEqual(view.title(), "Eingabegeräte")
+            self.assertTrue(view.lists["out"].isHidden())
+            self.assertFalse(view.lists["in"].isHidden())
+            self.assertTrue(view.lists["in"].item(0).text().startswith("✓"))
+            with unittest.mock.patch("core.system_status.set_audio_output") as switch:
+                view.lists["in"]._choose(view.lists["in"].item(1))
+            switch.assert_called_once_with("m2")  # Standard-Mikrofon von Windows wechseln
+
+    def test_switch_bar_keeps_its_height(self):
+        from ui.quick_panel import QuickPanel
+        outputs = self.OUT + [system_status.AudioOutput(c, f"Gerät {c}", False) for c in "cde"]
+        with unittest.mock.patch("core.system_status.audio_outputs", return_value=outputs), \
+                unittest.mock.patch("core.system_status.audio_inputs", return_value=self.IN):
+            panel = QuickPanel(self.ctx, "")
+            panel.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+            panel.outputs.refresh()
+            panel.show()
+            panel.adjustSize()
+            app.processEvents()
+            bar, tall = panel.outputs.bar.height(), panel.height()
+            panel.outputs.buttons["in"].click()  # kürzere Liste
+            app.processEvents()
+            self.assertEqual(panel.outputs.bar.height(), bar)  # die Leiste bläht sich nicht auf
+            self.assertLess(panel.height(), tall)  # das Fenster wird kleiner
+            short = panel.height()
+            panel.outputs.buttons["out"].click()
+            app.processEvents()
+            self.assertEqual(panel.outputs.bar.height(), bar)
+            back = panel.height()
+            self.assertGreater(back, short)
+            panel.outputs.buttons["in"].click()
+            panel.outputs.buttons["out"].click()
+            app.processEvents()
+            self.assertEqual((panel.outputs.bar.height(), panel.height()), (bar, back))  # hin und her bleibt gleich
+        panel.close()
+
+    def test_quick_panel_has_the_switch_bar(self):
+        from ui.audio_outputs import AudioDevices
+        from ui.quick_panel import QuickPanel
+        panel = QuickPanel(self.ctx, "")
+        self.assertIsInstance(panel.outputs, AudioDevices)
+        panel.close()
+
+    def test_mic_popup_shows_level_and_mutes(self):
+        from ui.topbar import MicPopup
+        with unittest.mock.patch("core.system_status.read_mic_volume", return_value=(40, False)):
+            popup = MicPopup(self.ctx, "")
+            popup.load(["Discord"])
+        self.assertEqual(popup.label.text(), "Mikrofon 40 %")
+        self.assertIn("Discord", popup.users.text())
+        with unittest.mock.patch("core.system_status.set_mic_muted") as mute:
+            popup.mute.click()
+        mute.assert_called_once_with(True)
+        self.assertEqual(popup.label.text(), "Mikrofon stumm")
+        with unittest.mock.patch("core.system_status.write_mic_volume") as level:
+            popup.slider.setValue(70)
+        level.assert_called_once_with(70)
+        popup.close()
+
+    def test_mic_icon_opens_its_own_window(self):
+        from ui.topbar import MicPopup
+        top = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        with unittest.mock.patch.object(MicPopup, "toggle_at") as opened, \
+                unittest.mock.patch("core.system_status.read_mic_volume", return_value=(10, False)), \
+                unittest.mock.patch.object(win_api, "shell_open") as shell:
+            top.mic.click()
+        opened.assert_called_once()
+        shell.assert_not_called()  # nicht mehr gleich die Windows-Einstellungen
+        top.close()
+
+    def test_right_click_on_an_icon_opens_its_menu(self):
+        from PySide6.QtGui import QContextMenuEvent
+        top = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        top.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.ctx.config.set_monitor(self.key, "show_network", True)
+        top.show()
+        top.root.layout().activate()
+        app.processEvents()
+        point = top.network.mapToGlobal(top.network.rect().center())
+        seen = []
+        top.network.clicked.disconnect()
+        top.network.clicked.connect(lambda: seen.append("netz"))
+        with unittest.mock.patch("ui.topbar.themed_menu") as menu:
+            top.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, top.mapFromGlobal(point), point))
+        self.assertEqual(seen, ["netz"])
+        menu.assert_not_called()  # nicht das Menü der Leiste
+        top.close()
+
+    def test_dragging_a_top_icon_saves_the_new_place(self):
+        top = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
+        top.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.ctx.config.set_monitor(self.key, "show_quick", True)
+        self.ctx.config.set_monitor(self.key, "show_notifications", True)
+        top.show()
+        top.root.layout().activate()
+        app.processEvents()
+        top._top_drag = "bell"
+        top._top_grab = QPoint(0, 0)
+        far_left = top.root.mapToGlobal(QPoint(-400, 5))
+        top._drag_top(top.bell, far_left)
+        self.assertEqual(top._arranged[0], "bell")
+        top._finish_top(top.bell)
+        self.assertEqual(self.ctx.config.monitor(self.key)["top_order"][0], "bell")
+        self.assertEqual(top._top_drag, "")
+        self.assertTrue(top.bell.property("topDrag"))
+        top.close()
+
+    def test_notifications_have_a_do_not_disturb_button(self):
+        from core import quick_settings
+        from ui.notification_panel import NotificationPanel
+        with unittest.mock.patch.object(quick_settings, "do_not_disturb", return_value=False):
+            panel = NotificationPanel(self.ctx)
+            panel.rebuild()
+        self.assertEqual(panel.quiet.text(), "Nicht stören")
+        with unittest.mock.patch.object(quick_settings, "set_do_not_disturb", return_value=True) as quiet:
+            panel.quiet.click()
+        quiet.assert_called_once_with(True)
+        self.assertTrue(panel.quiet.isChecked())
+        self.assertIn("an", panel.quiet.text())
+        with unittest.mock.patch.object(quick_settings, "set_do_not_disturb", return_value=False):
+            panel.quiet.click()  # Windows lehnt ab: Knopf zeigt den echten Zustand
+        self.assertTrue(panel.quiet.isChecked())
+        panel.close()
+
+    def test_claude_star_is_bigger(self):
+        from ui import claude_button
+        self.assertGreaterEqual(claude_button.SPARK_SCALE, 0.75)
+
+    def test_overview_shows_theme_and_switches_it(self):
+        from ui.theme_page import ThemeQuickPick
+        pick = ThemeQuickPick(self.ctx)
+        themes = self.ctx.theme.all_themes()
+        current = self.ctx.theme.current
+        self.assertIn(themes[current], pick.dropdown.text())
+        menu = pick.build_menu()
+        labels = [action.text() for action in menu.actions()]
+        self.assertIn("Neon-Nacht", labels)
+        self.assertEqual(next(a for a in menu.actions() if a.isChecked()).text(), themes[current])
+        pick.choose("neon_night")
+        self.assertEqual(self.ctx.theme.current, "neon_night")
+        self.assertIn("Neon-Nacht", pick.dropdown.text())
+        self.assertEqual(pick.card.name, "neon_night")
+
+    def test_settings_overview_starts_with_the_theme(self):
+        window = SettingsWindow(self.ctx)
+        self.assertTrue(hasattr(window, "theme_pick"))
+        window.close()
 
 
 if __name__ == "__main__":

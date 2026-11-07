@@ -11,11 +11,12 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 
 from core import win_api
-from ui.base import IconButton
+from ui.base import G, IconButton
 
 FALLBACK_TARGET = "shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude"
 STORE_FAMILY = "claude_pzs8sxrjxfjjc"
 RAYS = 11
+SPARK_SCALE = 0.8  # Anteil der Knopfhöhe; so groß wie das Haus des Home-Knopfs
 LONG, SHORT = 0.47, 0.33  # Länge der Strahlen, abwechselnd, als Anteil der Knopfgröße
 
 
@@ -81,7 +82,11 @@ def _disc(center: QPointF, radius: float) -> QPainterPath:
 
 class ClaudeButton(IconButton):
     def __init__(self, ctx):
-        super().__init__("", "Claude", name="Trash")
+        # Unsichtbar dasselbe Zeichen wie der Home-Knopf: So bekommt der Knopf genau dessen Größe und Hover-Fläche.
+        # Ohne Text rechnete Qt ihn breiter und flacher, und der Stern saß nicht in der Mitte.
+        super().__init__(G.START, "Claude", name="StartButton")
+        self.setProperty("claude", True)
+        self.setStyleSheet("QPushButton[claude=\"true\"] { color: transparent; }")
         self.ctx = ctx
         self.clicked.connect(lambda: press(ctx))
 
@@ -90,6 +95,6 @@ class ClaudeButton(IconButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         light = self.ctx.theme.mode == "light"
-        size = min(self.width(), self.height()) * 0.62
+        size = min(self.width(), self.height()) * SPARK_SCALE
         paint_spark(painter, QPointF(self.width() / 2, self.height() / 2), size, QColor("#202020" if light else "#FFFFFF"))
         painter.end()

@@ -35,10 +35,12 @@ from PySide6.QtGui import QCursor, QFont, QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from config.config_manager import ConfigManager  # noqa: E402
-from core import hardware, i18n, net_stats, wallpapers, win_api, windows_pins  # noqa: E402
+from core import hardware, i18n, net_stats, paths, wallpapers, win_api, windows_pins  # noqa: E402
+from core.version import VERSION  # noqa: E402
 from core.paths import LOG_DIR, app_command, app_shortcut  # noqa: E402
 from core.app_index import AppIndex  # noqa: E402
 from core.media_controller import MediaController  # noqa: E402
+from core.process_trim import ProcessTrimmer
 from core.monitor_manager import MonitorManager, screen_key  # noqa: E402
 from core.nova_controller import NovaController  # noqa: E402
 from ui.nova_panel import NovaPanel  # noqa: E402
@@ -47,6 +49,8 @@ from core.shell_hooks import ShellHooks  # noqa: E402
 from core.system_status import SystemStatus  # noqa: E402
 from core.theme_manager import ThemeManager  # noqa: E402
 from ui.animation import animation_duration  # noqa: E402
+from ui import base  # noqa: E402
+from ui.base import ForegroundWatch  # noqa: E402
 from ui.context_menu import ContextMenu  # noqa: E402
 from ui.desktop_groups import DesktopGroups  # noqa: E402
 from ui.search_launcher import SearchLauncher  # noqa: E402
@@ -89,6 +93,7 @@ class PopWinApp(QObject):
         self.last_media: dict | None = None
         self.bars: list = []
         self.hooks: ShellHooks | None = None
+        self._game_focused = False  # ein Vollbild-Spiel hat gerade den Fokus
         self._watchdog: subprocess.Popen | None = None
         self._closed = False
         self._exiting = False
@@ -126,6 +131,7 @@ class PopWinApp(QObject):
         self._taskbar_guard.timeout.connect(self._keep_taskbar_hidden)
 
         self.wallpaper = wallpapers.WallpaperPlayer(self)
+        self.trimmer = ProcessTrimmer(self.config, self)
         self.config.changed.connect(self._on_config)
         self.config.changed.connect(lambda key: key == "desktop_groups.style" and self.desktop_groups.sync())
         self.config.changed.connect(lambda key: key.startswith("wallpaper.") and self.wallpaper.sync())
@@ -133,7 +139,7 @@ class PopWinApp(QObject):
         # Windows meldet einen Monitorwechsel in mehreren Schritten, dazwischen stehen sterbende Bildschirme
         # noch in der Liste. Erst bauen, wenn es ruhig ist.
         self._screens_timer = QTimer(self, singleShot=True, interval=800)
-        self._screens_timer.timeout.connect(lambda: self.rebuild_bars(recreate=True))
+        self._screens_timer.timeout.connect(self._screens_settled)
         self.monitors.screens_changed.connect(self._screens_timer.start)
 
     def start(self) -> None:
@@ -151,16 +157,52 @@ class PopWinApp(QObject):
         self._started = True
         if not self.config.get("taskbar.windows_pins_imported"):
             self.import_windows_pins()
+        leftover = self.config.get("shell.saved_taskbar_state") is not None  # nach einem Neustart noch versteckt
         self._apply_native_taskbar()
+        if leftover and not self._taskbar_hidden:
+            self._restore_native_taskbar()
         self.rebuild_bars()
         self.widgets.start()
+        self.trimmer.sync()
         self.desktop_groups.sync()
         self.extensions.start()
+        ForegroundWatch.get().changed.connect(self._on_foreground)
         self._restart_hooks()
         QTimer.singleShot(UPDATE_DELAY_MS, self.updates.check)  # auch nach "PopWin neu starten"
         if self.config.get("first_run"):
             self.config.set("first_run", False, notify=False)
-            self.settings.open_page(setup=True)
+            self.config.set("updates.seen", VERSION, notify=False)
+            QTimer.singleShot(600, self.show_setup)
+        else:
+            QTimer.singleShot(1500, self.show_whats_new)
+
+    def show_setup(self) -> None:
+        """Die animierte Einrichtung; auch später über Einstellungen → Setup zu öffnen."""
+        from ui.intro_screens import SetupWizard
+        if getattr(self, "_intro", None) is not None and self._intro.isVisible():
+            self._intro.raise_()
+            return
+        self._intro = SetupWizard(self)
+        self._intro.destroyed.connect(lambda: setattr(self, "_intro", None))
+        self._intro.present()
+
+    def show_whats_new(self, force: bool = False) -> bool:
+        """Nach einem Update einmal die Neuerungen in kurzen Stichpunkten; `force` zeigt die neueste Version erneut."""
+        from ui.intro_screens import WhatsNew, changelog_sections, sections_since
+        seen = self.config.get("updates.seen", "")
+        if seen == VERSION and not force:
+            return False
+        self.config.set("updates.seen", VERSION, notify=False)
+        try:
+            text = (paths.ROOT / "CHANGELOG.md").read_text(encoding="utf-8-sig")
+        except OSError:
+            return False
+        sections = sections_since(changelog_sections(text), "" if force else seen)
+        if not sections:
+            return False
+        self._news = WhatsNew(self, sections)
+        self._news.present()
+        return True
 
     # --- Leisten ------------------------------------------------------------
     def _wanted_bars(self) -> dict[tuple, tuple]:
@@ -239,7 +281,7 @@ class PopWinApp(QObject):
             self.rebuild_bars()
             self._apply_native_taskbar()
         elif key in ("launcher.hotkey", "launcher.override_win_s", "context_menu.enabled", "start_menu.win_key",
-                     "nova.hotkey"):
+                     "nova.hotkey", "nova.enabled"):
             self._hook_timer.start()
 
     def _restart_hooks(self) -> None:
@@ -248,20 +290,37 @@ class PopWinApp(QObject):
         self.hooks = ShellHooks(self.config.get("launcher.hotkey"), self.config.get("context_menu.enabled"),
                                 self.config.get("launcher.override_win_s"),
                                 self.config.get("start_menu.win_key") != "windows",
-                                self.config.get("nova.hotkey"), self)
+                                self.config.get("nova.hotkey") if self.nova_enabled() else "", self)
         self.hooks.launcher_requested.connect(self.launcher.toggle)
         self.hooks.win_key_tapped.connect(self._on_win_key)
         self.hooks.nova_requested.connect(self.nova.toggle)
         self.hooks.kill_requested.connect(self.disable_ui)
         self.hooks.desktop_right_click.connect(lambda: self.show_context_menu(QCursor.pos(), desktop=True))
         self.hooks.hotkey_active.connect(self.settings.show_active_hotkey)
+        self.hooks.pause_mouse(self._game_focused)
         self.hooks.start()
+
+    def _on_foreground(self, hwnd: int) -> None:
+        """Hat ein Vollbild-Spiel den Fokus, läuft keine einzige Mausbewegung mehr durch PopWin."""
+        self._game_focused = win_api.is_fullscreen_window(hwnd)
+        if self.hooks:
+            self.hooks.pause_mouse(self._game_focused)
+
+    def _screens_settled(self) -> None:
+        """Spiele mit eigener Auflösung (etwa „gestreckt“ in Fortnite) melden das als Monitorwechsel.
+        Alle Leisten neu anzumelden blockiert dann mitten im Spiel sekundenlang und verschiebt den Arbeitsbereich,
+        deshalb erst, wenn das Vollbild weg ist. Bis dahin liegen die Leisten ohnehin hinter dem Spiel."""
+        if win_api.foreground_is_fullscreen():
+            self._screens_timer.start()
+            return
+        self.rebuild_bars(recreate=True)
 
     # --- Aktionen für die Module -----------------------------------------------
     def show_launcher(self) -> None:
         self.launcher.open()
 
     def toggle_start_menu(self, anchor) -> None:
+        self.start_menu.animator.length = 0  # per Klick in normalem Tempo
         self.start_menu.toggle(anchor)
 
     def _on_win_key(self) -> None:
@@ -270,14 +329,22 @@ class PopWinApp(QObject):
             return
         # An der Taskbar des gewählten Bildschirms; gibt es dort keine, frei in der Mitte unter der Maus.
         dock = self._home_dock()
-        if dock is not None and not self.start_menu.isVisible():
-            for bar in self.bars:  # im Vollbild lagen die Leisten hinter dem Spiel oder Video
-                if bar.bar_screen == dock.bar_screen:
-                    bar.peek()
+        # Im Spiel geht alles schneller, beim Öffnen wie beim Zurückklicken.
+        self.start_menu.animator.length = base.QUICK_MS if dock is not None and dock._fullscreen else 0
+        peek = dock is not None and not self.start_menu.isVisible()
         if self.start_menu.isVisible() or dock is None or not dock.option("show_start"):
             self.start_menu.toggle(None if dock is None or not dock.option("show_start") else dock.start)
-            return
-        dock.show_then(lambda: self.start_menu.toggle(dock.start))
+        else:
+            dock.show_then(lambda: self.start_menu.toggle(dock.start))
+        if peek:
+            # Erst nach dem Home-Menü: Dann hat PopWin den Vordergrund, und Leisten und Menü starten ihre Animation
+            # im selben Augenblick. Vorher kamen die Leisten hinter dem Spiel ein Stück später nach.
+            self._peek_bars(dock.bar_screen)
+
+    def _peek_bars(self, screen) -> None:
+        for bar in self.bars:  # im Vollbild lagen die Leisten hinter dem Spiel oder Video
+            if bar.bar_screen == screen:
+                bar.peek()
 
     def _home_dock(self) -> Dock | None:
         docks = [bar for bar in self.bars if isinstance(bar, Dock)]
@@ -285,6 +352,10 @@ class PopWinApp(QObject):
             screen = QGuiApplication.screenAt(QCursor.pos())
             return next((dock for dock in docks if dock.bar_screen == screen), None)
         return next((dock for dock in docks if self.monitors.is_primary(dock.bar_screen)), None)
+
+    def nova_enabled(self) -> bool:
+        """Wer Nova im Setup abgelehnt hat, sieht sie nirgends außer in den Einstellungen."""
+        return bool(self.config.get("nova.enabled", True))
 
     def open_settings(self) -> None:
         self.settings.open_page()
@@ -348,7 +419,9 @@ class PopWinApp(QObject):
         self._taskbar_hidden = hide
         if hide:
             # Muss vor dem Ausblenden gespeichert sein, der Wächter liest ihn nach einem Absturz.
-            self.config.set("shell.saved_taskbar_state", win_api.taskbar_state(), notify=False)
+            # Steht schon einer da, kommt PopWin aus einem Neustart: Die Leiste ist noch versteckt, der alte Wert ist der echte.
+            if self.config.get("shell.saved_taskbar_state") is None:
+                self.config.set("shell.saved_taskbar_state", win_api.taskbar_state(), notify=False)
             self._start_watchdog()
             win_api.hide_native_taskbar()
             self._taskbar_guard.start()
@@ -387,7 +460,7 @@ class PopWinApp(QObject):
         self._exiting = True
         for window in [*self.bars, *self.widgets.windows.values()]:
             window.animator.leave()
-        delay = animation_duration(self.config.get("animations")) + 40
+        delay = animation_duration(self.config.get("animations"), self.config.get("performance.level", "balanced")) + 40
         QTimer.singleShot(delay, self._finish_exit)
 
     def _offer_update(self, release: dict) -> None:
@@ -418,7 +491,9 @@ class PopWinApp(QObject):
             return
         self._closed = True
         # Zuerst die Taskleiste: Sie muss zurückkommen, selbst wenn danach etwas schiefgeht.
-        if self._taskbar_hidden:
+        # Beim Neustart nicht: Sie nähme kurz Platz und schöbe ein laufendes Spiel (Valorant) nach oben.
+        # Das neue PopWin versteckt sie gleich wieder; kommt es nicht, stellt der Wächter sie zurück.
+        if self._taskbar_hidden and not self.restart_requested:
             self._restore_native_taskbar()
         for bar in self.bars:
             bar.undock()

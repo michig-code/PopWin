@@ -1,5 +1,41 @@
 ﻿# Änderungen
 
+## 4.0.0
+
+- Mit der Windows-Taste holen Sie Taskbar, Topbar und Home-Menü jetzt superschnell, flüssig und ohne lästiges Aufblitzen in den Vollbildmodus.
+- Ein Klick zurück ins Spiel gibt die Leisten sofort frei, sodass Sie ohne Wartezeit weiterspielen können.
+- In Spielen wie Fortnite haben Sie keine hängende oder ruckelnde Maus mehr, da PopWin während des Vollbilds keine Mausbewegungen verarbeitet.
+- PopWin verkleinert laufende Vollbild-Spiele oder -Videos (wie Valorant) nicht mehr versehentlich, sodass der volle Bildschirm genutzt wird.
+- Eine neue Sprachanzeige (z. B. „DEU“) zeigt die Tastatursprache, ein Klick schaltet weiter, und zwei neue Knöpfe für Bildschirm-Projektion und Screenshots sorgen für mehr Komfort.
+- Ein Klick auf Ihren Benutzernamen öffnet ein praktisches Profil-Menü zum Sperren, Benutzer wechseln oder Abmelden, während die offenen Fenster erreichbar bleiben.
+- Rote Zahlen auf App-Icons zeigen Ihnen neue Nachrichten von Discord oder Mail auf einen Blick, die nach dem Lesen automatisch verschwinden.
+- Ein neues, schwebendes Dock lässt sich als runde Pille mit frei einstellbarem Abstand zum Bildschirmrand nutzen.
+- Bei runden UI-Stilen gehören hässliche, dunkle Ecken der Vergangenheit an, da alle Menüs und Widgets jetzt sauber dargestellt werden.
+- Die Einstellungen für Monitore wurden vereinfacht, sodass Sie alles zu Topbar und Taskbar direkt auf den jeweiligen Seiten finden.
+- Die neue Seite „Teilen & Presets“ erlaubt es Ihnen, Ihre Einstellungen zu sichern, zu laden oder einfach als Datei mit Freunden zu teilen, ohne private Daten preiszugeben.
+- Das Home-Menü öffnet sich spürbar schneller, und im Hintergrund pausieren die Leisten bei laufenden Spielen oder Videos, um wertvolle Rechenleistung zu sparen.
+- Taskbar-Icons können auf Wunsch beim Darüberfahren wie auf dem Mac sanft größer werden.
+- Dank einer übersichtlicheren Auswahl an ruhigen und modernen Design-Stilen finden Sie sofort den Look, der Ihnen am besten gefällt.
+- Ein schicker, animierter Neon-Setup-Bildschirm führt Sie beim ersten Start entspannt durch alle wichtigen Grundeinstellungen.
+- Nach jedem Update werden Ihnen die wichtigsten Neuerungen kurz und übersichtlich vorgestellt, damit Sie immer auf dem Laufenden sind.
+- Auf der neuen Theme-Seite basteln Sie sich mit Live-Vorschau ganz einfach eigene Designs aus Farben, Transparenzen und Leuchteffekten zusammen.
+- Neue Apps ploppen sanft in die Taskbar, und Sie können Symbole wie Home, Suche oder Player ganz leicht per Drag-and-drop verschieben.
+- Die Vergrößerung der Taskbar-Icons reagiert jetzt noch flüssiger und setzt ein, sobald sich die Maus von oben nähert.
+- Der neue Leisten-Designer macht das An- und Ausschalten sowie das Sortieren von Symbolen per Klick und Ziehen kinderleicht.
+- Sie können aus fünf verschiedenen Startmenü-Varianten wählen und diese dank Live-Vorschau direkt ausprobieren.
+- Über die neue Leistungsseite wählen Sie zwischen Sparsam, Ausgewogen und Schön, um Akku zu sparen oder Windows im Hintergrund zu entlasten.
+- Das kurze Aufblitzen von kleinen Fenstern beim Start und in den Schnelleinstellungen wurde komplett behoben.
+- Neu strukturierte Einstellungskategorien und verständlichere Namen sorgen dafür, dass Sie sich sofort zurechtfinden.
+- Das Dev-Menü hilft Ihnen bei Fehlern mit klaren Rotstift-Hinweisen und bietet praktische KI-Hilfe zum Zusammenfassen von Texten.
+- Der Claude-Knopf in der Taskbar hat jetzt genau die perfekte Größe wie der Home-Knopf.
+- In den Schnelleinstellungen und im Lautstärke-Fenster wechseln Sie nun mit einem Klick zwischen Ton-Ausgabe und -Eingabe, um Ihr Mikrofon direkt einzustellen.
+- Ein neues Mikrofon-Fenster in der Topbar zeigt Ihnen den Pegel, regelt die Stummschaltung und verrät, welche App gerade Ihr Mikrofon nutzt.
+- Symbole rechts in der Topbar lassen sich nun wie in der Taskbar weich und fließend mit der Maus verschieben.
+- Ein Rechtsklick auf Topbar-Symbole wie Netzwerk oder Lautstärke öffnet sofort das dazugehörige Menü.
+- Benachrichtigungen bieten Ihnen jetzt einen praktischen „Nicht stören“-Knopf direkt unten an.
+- Auf der Übersichtsseite in den Einstellungen sehen Sie Ihr aktuelles Theme in einer Vorschau und wechseln es direkt über ein Dropdown-Menü.
+- Das Claude-Zeichen in der Taskbar ist für eine bessere Bedienbarkeit etwas größer geworden.
+
 ## 3.8.5
 
 - Explorer: KI-gestützte Dateisortierung mit interaktiver Vorschau, Ordner-Verschiebung (mit Strg+Z Rückgängig) und virtueller Themen-Gruppierung

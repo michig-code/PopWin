@@ -12,6 +12,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
+from core import theme_maker
+
 log = logging.getLogger(__name__)
 
 THEME_DIR = Path(__file__).resolve().parent.parent / "themes"
@@ -20,25 +22,18 @@ PRESETS = {
     "pop_basic": "Pop!_OS Basic",
     "clean": "Clean",
     "minimalist": "Minimalistisch",
-    # Kachel-Stile: Jedes Icon der Taskbar sitzt in einer eigenen dunklen Kachel.
-    "tiles_glass": "Dunkles Glas",
+    # Kachel-Stile: Jedes Icon der Taskbar sitzt in einer eigenen dunklen Kachel. Ruhige Farben, die beim Zocken nicht ablenken.
+    "tiles_graphite": "Graphit",
     "tiles_obsidian": "Obsidian",
-    "tiles_nova": "Nova Galaxie",
     "tiles_frost": "Frostglas",
-    "tiles_neon": "Neon-Kontur",
-    "tiles_amber": "Bernstein",
-    "tiles_graphite": "Graphit rund",
-    "tiles_ocean": "Ozean",
-    # Glas-Familie im Stil von Liquid Glass, jede mit eigenem Glas-Effekt
+    # Glas-Familie im Stil von Liquid Glass, hell und gut lesbar für die Arbeit
     "glass_clear": "Klarglas",
-    "glass_rose": "Rosé-Glas",
-    "glass_emerald": "Smaragd-Glas",
-    "glass_prism": "Prisma-Glas",
     "glass_smoke": "Rauchglas",
-    "glass_liquid": "Flüssigglas",
+    # Dunkles Violett mit Verlauf von Lila nach Pink; erzeugt von core/theme_maker.py (NEON_SPEC)
+    "neon_night": "Neon-Nacht",
 }
-TILE_MODES = {"theme": "Wie im UI-Stil", "on": "An", "off": "Aus"}
-TILE_SHAPES = {"theme": "Wie im UI-Stil", "round": "Komplett rund"}
+TILE_MODES = {"theme": "Wie im Theme", "on": "An", "off": "Aus"}
+TILE_SHAPES = {"theme": "Wie im Theme", "round": "Komplett rund"}
 # Qt rundet nur bis zur halben Höhe; mehr, und die Ecke bleibt eckig. Darum je Knopfart ein eigener Radius.
 TILES_ROUND = """
 #Bar { border-radius: 31px; }
@@ -112,8 +107,30 @@ class ThemeManager(QObject):
     def current(self) -> str:
         return self.config.get("theme")
 
+    def exists(self, name: str) -> bool:
+        return name in PRESETS or (theme_maker.is_custom(name) and theme_maker.custom_path(name).exists())
+
+    def all_themes(self) -> dict[str, str]:
+        """Eingebaute und eigene Themes, Kennung -> Anzeigename."""
+        return {**PRESETS, **theme_maker.list_custom()}
+
+    def forget(self, name: str) -> None:
+        """Nach dem Speichern oder Löschen eines eigenen Themes neu laden."""
+        self._cache.pop(name, None)
+        self.changed.emit()
+
+    def preview_sheet(self, spec: dict) -> str:
+        """Stylesheet für die Live-Vorschau im Theme-Editor, ohne etwas zu speichern."""
+        return self._base_qss() + theme_maker.render(spec)
+
+    def _base_qss(self) -> str:
+        try:
+            return (THEME_DIR / "_base.qss").read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
     def set_theme(self, name: str) -> None:
-        if name in PRESETS and name != self.current:
+        if self.exists(name) and name != self.current:
             self.config.set("theme", name, notify=False)
             self.changed.emit()
 
@@ -138,7 +155,7 @@ class ThemeManager(QObject):
             self.changed.emit()
 
     def tiles(self, name: str = "") -> bool:
-        """Sitzen die Icons der Taskbar in Kacheln? Der UI-Stil entscheidet, außer man stellt es fest ein."""
+        """Sitzen die Icons der Taskbar in Kacheln? Das Theme entscheidet, außer man stellt es fest ein."""
         mode = self.tile_mode
         return self.meta(name)["tiles"] == "1" if mode == "theme" else mode == "on"
 
@@ -148,15 +165,19 @@ class ThemeManager(QObject):
             self.changed.emit()
 
     def _load(self, name: str) -> tuple[str, dict]:
-        if name not in PRESETS:
-            name = self.current
+        if not self.exists(name):
+            name = self.current if self.exists(self.current) else "liquid_glass"
         if name not in self._cache:
-            try:
-                qss = (THEME_DIR / "_base.qss").read_text(encoding="utf-8")
-                qss += (THEME_DIR / f"{name}.qss").read_text(encoding="utf-8")
-            except OSError as exc:
-                log.error("Theme %s nicht lesbar: %s", name, exc)
-                qss = ""
+            if theme_maker.is_custom(name):
+                spec = theme_maker.load_spec(name) or theme_maker.DEFAULT_SPEC
+                qss = self._base_qss() + theme_maker.render(spec)
+            else:
+                try:
+                    qss = (THEME_DIR / "_base.qss").read_text(encoding="utf-8")
+                    qss += (THEME_DIR / f"{name}.qss").read_text(encoding="utf-8")
+                except OSError as exc:
+                    log.error("Theme %s nicht lesbar: %s", name, exc)
+                    qss = ""
             meta = dict(META_DEFAULTS)
             match = _META_RE.search(qss)
             if match:

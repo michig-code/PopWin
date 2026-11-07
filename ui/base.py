@@ -8,7 +8,7 @@ import time
 from ctypes import wintypes
 
 import shiboken6
-from PySide6.QtCore import QPointF, QSize, QEvent, QFileInfo, QObject, QPoint, QRect, Qt, QTimer
+from PySide6.QtCore import QPointF, QSize, QEvent, QFileInfo, QObject, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSlider, QAbstractSpinBox, QApplication, QComboBox, QHBoxLayout, QMenu, QPushButton, QScrollArea, QScrollBar,
@@ -188,6 +188,15 @@ def _take_icon(handle: int) -> QIcon:
     return QIcon(QPixmap.fromImage(image)) if not image.isNull() else QIcon()
 
 
+WINDOWS_CORNER = 8  # runder als 8 px rundet Windows keine Fenster
+
+
+def uses_native_backdrop(meta: dict) -> bool:
+    """Blur und Ecken von Windows nur bei Stilen, deren Ecken Windows auch so rund schafft.
+    Bei runderen Stilen malt Windows sonst um die runde Fläche ein dunkles 8-px-Rechteck: die falschen Ecken."""
+    return int(meta.get("corner") or 0) <= WINDOWS_CORNER
+
+
 class ThemedWindow(QWidget):
     """Top-Level-Fenster, das Theme, Modus und Blur automatisch nachzieht."""
     THEMED_CHILDREN = ("Bar", "Panel", "Desklet")
@@ -206,15 +215,29 @@ class ThemedWindow(QWidget):
         hints = QGuiApplication.styleHints()
         if hints.colorScheme() != scheme:
             hints.setColorScheme(scheme)
-        self.setProperty("popMode", theme.mode)
-        for child in self.findChildren(QWidget):
-            if child.objectName() in self.THEMED_CHILDREN:
-                child.setProperty("popMode", theme.mode)
-        self.setStyleSheet(theme.stylesheet(self.theme_name))
+        sheet = theme.stylesheet(self.theme_name)
+        # Ein Stylesheet neu zu setzen stylt das ganze Fenster neu und kostet beim Home-Menü spürbar Zeit.
+        # Popups rufen das bei jedem Öffnen auf, deshalb nur, wenn sich Stil oder Hell/Dunkel wirklich geändert haben.
+        if self.styleSheet() != sheet or self.property("popMode") != theme.mode:
+            self.setProperty("popMode", theme.mode)
+            for child in self.findChildren(QWidget):
+                if child.objectName() in self.THEMED_CHILDREN:
+                    child.setProperty("popMode", theme.mode)
+            self.setStyleSheet(sheet)  # stylt auch bei gleichem Text neu, das braucht der Wechsel von Hell/Dunkel
         meta = theme.meta(self.theme_name)
         hwnd = int(self.winId())
-        win_api.set_blur(hwnd, meta["blur"], theme.tint(self.theme_name))
-        win_api.set_rounded(hwnd, meta["rounded"] == "1")
+        if self.native_backdrop():
+            win_api.set_blur(hwnd, meta["blur"], theme.tint(self.theme_name))
+            win_api.set_rounded(hwnd, meta["rounded"] == "1")
+        else:  # die Fläche malt Qt selbst mit den runden Ecken aus dem Stil
+            win_api.set_blur(hwnd, "none")
+            win_api.set_rounded(hwnd, False)
+
+    def native_backdrop(self) -> bool:
+        # Ein deckendes Fenster hat keine durchsichtigen Ecken; dort braucht es die Rundung von Windows.
+        if not self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+            return True
+        return uses_native_backdrop(self.meta())
 
     def meta(self) -> dict:
         return self.ctx.theme.meta(self.theme_name)
@@ -246,6 +269,7 @@ class NovaButton(IconButton):
 
 # Stufe -> (Pixel vom Rand, Sekunden, die die Maus dort bleiben muss)
 PEEK_SECONDS = 1.5  # so lange bleibt die Leiste im Vollbild mindestens vorn
+QUICK_MS = 120  # im Spiel: Leisten und Home-Menü kommen und gehen schneller als sonst
 EDGE_LEVELS = {1: (1, 0.45), 2: (2, 0.3), 3: (6, 0.15), 4: (16, 0.06), 5: (40, 0.0)}
 
 
@@ -269,6 +293,20 @@ def in_hot_zone(x: int, y: int, area: tuple[int, int, int, int], edge: str, dept
     if not left <= x < right:
         return False
     return top <= y < top + depth if edge == "top" else bottom - depth <= y < bottom
+
+
+class ForegroundWatch(QObject):
+    """Meldet sofort, wenn ein anderes Programm den Fokus bekommt - etwa ein Spiel nach einem Klick hinein.
+    Eine einzige Meldung für alle Leisten; sie kommt im Hauptthread an, Maus und Tastatur bleiben unberührt."""
+    changed = Signal(int)
+    _instance: "ForegroundWatch | None" = None
+
+    @classmethod
+    def get(cls) -> "ForegroundWatch":
+        if cls._instance is None:
+            cls._instance = cls(QApplication.instance())
+            cls._instance.hook = win_api.watch_foreground(cls._instance.changed.emit)
+        return cls._instance
 
 
 class ScrollFields(QObject):
@@ -333,6 +371,8 @@ class BarWindow(ThemedWindow):
         self._on_top = True
         self._fullscreen_timer = QTimer(self, interval=700)
         self._fullscreen_timer.timeout.connect(self._check_fullscreen)
+        self._watching = False  # hört auf Fokuswechsel
+        self._reposition_later = False  # im Vollbild aufgeschoben: jede Platzänderung schrumpft sonst das Spiel
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -364,8 +404,8 @@ class BarWindow(ThemedWindow):
             # --- [Antigravity Ende: Sidebar Support] ---
             win_api.place_window(int(self.winId()), x, y + offset, width, height)
 
-    def _fade_in(self) -> None:
-        self.animator.enter(1.0, slide=-12 if self.edge in ("top", "left") else 12)  # [Antigravity: Sidebar Support]
+    def _fade_in(self, length: int = 0) -> None:
+        self.animator.enter(1.0, slide=-12 if self.edge in ("top", "left") else 12, length=length)  # [Antigravity: Sidebar Support]
 
     # --- Auto-Hide ---------------------------------------------------------------
     def auto_hides(self) -> bool:
@@ -404,7 +444,9 @@ class BarWindow(ThemedWindow):
 
     def _keeps_open(self) -> bool:
         panel = PopupPanel._open_panel
-        return QApplication.activePopupWidget() is not None or (panel is not None and panel.isVisible())
+        # Ein Menü, das gerade ausblendet, hält die Leiste nicht mehr: Sonst bliebe sie nach dem Klick ins Spiel noch vorn.
+        open_panel = panel is not None and panel.isVisible() and not panel.animator.closing
+        return QApplication.activePopupWidget() is not None or open_panel
 
     def _watch_edge(self) -> None:
         """Zeigt die Leiste, solange die Maus am Rand oder auf ihr ist."""
@@ -436,10 +478,15 @@ class BarWindow(ThemedWindow):
         self.setWindowOpacity(0)  # unsichtbar andocken; reveal() blendet alle Leisten gemeinsam ein
         self.show()
         self.apply_theme()
-        win_api.appbar_register(int(self.winId()), self._APPBAR_MESSAGE)
+        win_api.appbar_register(int(self.winId()), self._APPBAR_MESSAGE)  # meldet nur an, der Arbeitsbereich bleibt
         self._registered = True
+        # Läuft beim Start schon ein Spiel, darf die Leiste ihm keinen Platz wegnehmen - noch vor dem ersten Platzieren prüfen.
+        self._fullscreen = win_api.fullscreen_on(native_rect(self.bar_screen))
         self.reposition()
         self._fullscreen_timer.start()
+        if not self._watching:
+            self._watching = True
+            ForegroundWatch.get().changed.connect(self._on_foreground)
 
     def _check_fullscreen(self) -> None:
         # Eigene Prüfung statt ABN_FULLSCREENAPP: Das Signal unterscheidet Monitore nicht zuverlässig,
@@ -447,14 +494,54 @@ class BarWindow(ThemedWindow):
         self._enforce_placement()
         self._fullscreen = win_api.fullscreen_on(native_rect(self.bar_screen))
         self._place_in_z()
+        if not self._fullscreen and self._reposition_later:
+            self._reposition_later = False
+            self.reposition()
+
+    def _on_foreground(self, hwnd: int) -> None:
+        """Ein anderes Programm hat den Fokus. Ist es das Vollbild auf diesem Monitor, gibt die Leiste sofort frei,
+        statt bis zur nächsten Prüfung und dem Ende des Hereinschauens vorn zu bleiben."""
+        if not self._registered or not shiboken6.isValid(self):
+            return
+        if hwnd and win_api.fullscreen_window_on(hwnd, native_rect(self.bar_screen)):
+            self.release_to_game()
+            return
+        self._check_fullscreen()
+
+    def release_if_game_in_front(self) -> None:
+        """Ein Menü hat den Fokus abgegeben. Ging er ans Spiel, verschwindet die Leiste im selben Moment wie das Menü."""
+        if not self._registered or not shiboken6.isValid(self):
+            return
+        hwnd = win_api.foreground_window()
+        if hwnd and win_api.fullscreen_window_on(hwnd, native_rect(self.bar_screen)):
+            self.release_to_game()
+
+    def release_to_game(self) -> None:
+        self._fullscreen = True
+        self._peek_until = 0.0
+        self._hot_since = None
+        if not self._on_top and self.auto_hides() and self._revealed:
+            self._revealed = False  # lag schon hinter dem Spiel
+            self.animator.leave()
+        self._place_in_z()
 
     def peek(self) -> None:
-        """Windows-Taste im Vollbild: Die Leiste kommt nach vorn, solange das Home-Menü offen ist oder die Maus auf ihr liegt."""
+        """Windows-Taste im Vollbild: Die Leiste kommt nach vorn, solange das Home-Menü offen ist oder die Maus auf ihr liegt.
+        Sie gleitet herein wie das Home-Menü, statt plötzlich dazustehen."""
         self._peek_until = time.monotonic() + PEEK_SECONDS
-        if self._fullscreen:
+        if self._fullscreen and not self._on_top:
+            self._on_top = True
+            self._revealed = True
+            self._hide_at = self._peek_until  # Auto-Hide nimmt sie sonst beim nächsten Blick auf den Rand gleich wieder weg
             self.show()
-            self.setWindowOpacity(1)
+            self._fade_in(QUICK_MS)  # macht sie sofort durchsichtig - erst danach nach vorn, sonst blitzt sie auf
+            win_api.set_zorder(int(self.winId()), win_api.HWND_TOPMOST)
         self._place_in_z()
+
+    def behind_game(self) -> bool:
+        """Liegt hinter einem Vollbild-Spiel oder -Video und ist nicht zu sehen: Dann spart sich die Leiste ihre Arbeit.
+        Der Spielmodus lässt sich abschalten, dann arbeitet sie auch dahinter weiter."""
+        return self._fullscreen and not self._on_top and bool(self.ctx.config.get("performance.game_mode", True))
 
     def peeking(self) -> bool:
         if time.monotonic() < self._peek_until:
@@ -468,10 +555,33 @@ class BarWindow(ThemedWindow):
         on_top = not self._fullscreen or self.peeking()
         if on_top != self._on_top:
             self._on_top = on_top
-            win_api.set_zorder(int(self.winId()), win_api.HWND_TOPMOST if on_top else win_api.HWND_BOTTOM)
+            if on_top:
+                win_api.set_zorder(int(self.winId()), win_api.HWND_TOPMOST)
+            else:
+                self._sink()
+
+    def _sink(self) -> None:
+        """Zurück ins Spiel: schnell hinausgleiten und dann hinter dem Spiel liegen, statt einfach wegzuspringen."""
+        hwnd = int(self.winId())
+
+        def behind() -> None:
+            if not self._on_top:  # inzwischen wieder geholt
+                win_api.set_zorder(hwnd, win_api.HWND_BOTTOM)
+
+        if not self.isVisible() or self.animator.closing:
+            behind()
+            return
+        if self.auto_hides():
+            self._revealed = False
+            self.animator.leave(behind, length=QUICK_MS)
+        else:
+            self.animator.leave(behind, hide=False, length=QUICK_MS)  # bleibt da, für die Zeit nach dem Spiel
 
     def undock(self) -> None:
         self._fullscreen_timer.stop()
+        if self._watching:
+            self._watching = False
+            ForegroundWatch.get().changed.disconnect(self._on_foreground)
         if self._registered:
             self._registered = False
             win_api.appbar_remove(int(self.winId()))
@@ -480,6 +590,13 @@ class BarWindow(ThemedWindow):
     def reposition(self) -> None:
         if not self._registered:
             return
+        if self._fullscreen:
+            # Ändert sich hier der reservierte Platz, passt Windows alle maximierten Fenster neu ein -
+            # auch Spiele und Videos, die sich als maximiert melden (Valorant, Discord). Sie rutschten unter die Topbar.
+            # Das gilt auch beim Start von PopWin: Dann steht die Leiste schon da, nimmt sich ihren Platz aber erst nach dem Spiel.
+            self._reposition_later = True
+            if self._rect is not None:
+                return
         monitor = native_rect(self.bar_screen)
         ratio = self.bar_screen.devicePixelRatio()
         size = round(self.bar_size() * ratio)
@@ -488,9 +605,12 @@ class BarWindow(ThemedWindow):
         # Der Abstand gilt auf beiden Seiten: zum Bildschirmrand und zu den Fenstern.
         # Ohne Reservierung gehen Fenster bis zum Rand und die Leiste schwebt darüber.
         thickness = size + 2 * margin if self.reserves_space() else 0
-        rect = win_api.appbar_set_pos(hwnd, self.edge, monitor, thickness, self._rect)
-        self._rect = rect
-        left, top, right, bottom = rect if thickness else monitor
+        if self._fullscreen:
+            left, top, right, bottom = monitor  # an den Rand stellen, ohne Platz zu nehmen
+        else:
+            rect = win_api.appbar_set_pos(hwnd, self.edge, monitor, thickness, self._rect)
+            self._rect = rect
+            left, top, right, bottom = rect if thickness else monitor
         # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
         if self.edge in ("left", "right"):
             x = left + margin if self.edge == "left" else right - size - margin
@@ -551,6 +671,9 @@ class BarWindow(ThemedWindow):
         super().apply_theme()
         self.on_meta_changed(self.meta())
         self.reposition()
+
+    def native_backdrop(self) -> bool:
+        return True  # die Leisten regeln Blur und Ecken selbst (Taskbar: _apply_native_backdrop)
 
     def on_meta_changed(self, meta: dict) -> None:
         pass
@@ -647,8 +770,14 @@ class PopupPanel(ThemedWindow):
 
     def event(self, event) -> bool:
         if event.type() == QEvent.Type.WindowDeactivate:
-            QTimer.singleShot(0, self.dismiss)
+            QTimer.singleShot(0, self._deactivated)
         return super().event(event)
+
+    def _deactivated(self) -> None:
+        self.dismiss()
+        # Zurück ins Spiel geklickt: Leisten und Menü gehen gemeinsam, nicht erst, wenn Windows den Wechsel meldet.
+        for bar in list(getattr(self.ctx, "bars", [])):
+            bar.release_if_game_in_front()
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -690,6 +819,7 @@ class PopupPanel(ThemedWindow):
             y = screen.center().y() - self.height() // 2 if self.CENTERED else top_left.y()
             y = min(max(y, screen.top() + 4), screen.bottom() - self.height() - 4)
             self.move(x, y)
+            self.setWindowOpacity(0)  # sonst steht das Menü bis zum Start der Animation kurz voll da
             self.show()
             win_api.force_foreground(int(self.winId()))
             self.activateWindow()
@@ -707,6 +837,7 @@ class PopupPanel(ThemedWindow):
             bar_top = anchor.window().mapToGlobal(QPoint(0, 0)).y() - offset
             y = bar_top - self.height() - bar_gap
         self.move(x, y)
+        self.setWindowOpacity(0)  # sonst steht das Menü bis zum Start der Animation kurz voll da
         self.show()
         win_api.force_foreground(int(self.winId()))
         self.activateWindow()

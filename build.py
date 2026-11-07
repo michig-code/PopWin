@@ -35,7 +35,8 @@ def pyinstaller(*arguments: str) -> None:
 
 def build_app() -> Path:
     arguments = ["--windowed", "--name", "PopWin", "--icon", str(ROOT / "assets" / "popwin.ico"),
-                 "--add-data", f"{ROOT / 'assets'};assets", "--add-data", f"{ROOT / 'themes'};themes"]
+                 "--add-data", f"{ROOT / 'assets'};assets", "--add-data", f"{ROOT / 'themes'};themes",
+                 "--add-data", f"{ROOT / 'CHANGELOG.md'};."]  # für „Was ist neu“ nach einem Update
     for module in APP_MODULES:
         arguments += ["--hidden-import", module]
     for package in COLLECT:

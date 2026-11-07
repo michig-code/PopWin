@@ -34,29 +34,53 @@ Blick behält.
 
 *Die Screenshots zeigen Beispieldaten in der englischen Oberfläche.*
 
+## Neu in 4.0
+- **Einrichtung und „Was ist neu“** – ein animierter Willkommensbildschirm führt durch Theme, Taskbar-Form, Nova (Ja
+  oder Nein), Leistung und Autostart. Nach jedem Update zeigt PopWin die Neuerungen einmal in kurzen Stichpunkten.
+- **Themes** – eine Galerie mit Vorschaukarten und ein Editor für eigene Themes: Akzentfarben, Hintergrund, Deckkraft,
+  Ecken und Leuchten mit Live-Vorschau. Teilen als `.popwin-theme`-Datei. Neu dabei: **Neon-Nacht**.
+- **Topbar** – Symbole per Maus in jede Reihenfolge ziehen, Rechtsklick auf ein Symbol öffnet sein Menü, ein neues
+  Mikrofon-Fenster (Pegel, stumm, Eingabegerät, welche App zuhört), ein Benutzer-Bereich mit Sperren, Benutzer wechseln
+  und Abmelden, eine Anzeige der Tastatur-Sprache und Knöpfe für Bildschirm projizieren und das Ausschneide-Tool
+- **Taskbar** – rote Zahlen für neue Mitteilungen, ein schwebendes Dock, neue Apps ploppen sanft herein, und Home,
+  Suche, Player, Nova, Papierkorb und Desktop lassen sich an jeden Platz ziehen, auch auf die andere Seite der Apps
+- **Startmenü** – fünf Varianten mit Vorschau: Raster, Liste, große Kacheln, schmale Leiste und Suche zuerst
+- **Audio** – Schnelleinstellungen und Lautstärke-Fenster wechseln zwischen Ausgabe- und Eingabegeräten, so ist dein
+  Standard-Mikrofon einen Klick entfernt
+- **Benachrichtigungen** – ein Knopf für *Nicht stören* ganz unten im Benachrichtigungs-Fenster
+- **Einstellungen** – nach Themen sortiert, mit einer Übersicht, die dein Theme zeigt und es per Dropdown wechselt,
+  einem Leisten-Designer für Topbar und Taskbar und *Teilen & Presets* zum Speichern, Exportieren und Importieren
+- **Leistung** – eine neue Seite mit den Stufen Sparsam, Ausgewogen und Schön, ein Spielmodus, der die Leisten hinter
+  Vollbild-Spielen ruhen lässt, und auf Wunsch „Windows entlasten“ für Hintergrund-Apps wie Widgets oder Game Bar
+- **Spiele** – die Leisten verkleinern kein Vollbild-Spiel mehr, die Maus ruckelt nicht mehr in Spielen wie Fortnite,
+  und die Windows-Taste holt die Leisten schnell und weich herein
+
 ## Funktionen
-- **Topbar und Taskbar** – auf allen Monitoren oder nur auf manchen, synchron oder pro Monitor eingestellt; volle Breite
-  oder nur so breit wie die Icons, links, mittig oder rechts, Auto-Hide am Rand. Die Uhr steht genau dort, wo du in
-  einem kleinen Bild deines Bildschirms hinklickst.
+- **Topbar und Taskbar** – auf allen Monitoren oder nur auf manchen, synchron oder pro Monitor eingestellt; volle
+  Breite, nur so breit wie die Icons oder als schwebendes Dock, links, mittig oder rechts, Auto-Hide am Rand. Die Uhr
+  steht genau dort, wo du in einem kleinen Bild deines Bildschirms hinklickst.
 - **Taskbar wie bei Windows** – dieselben Symbole wie in der Windows-Taskleiste (Store-Apps, Java-Spiele, Web-Apps),
-  feste Reihenfolge, verschieben per Maus, Live-Vorschau, Anheften durch Draufziehen
+  feste Reihenfolge, verschieben per Maus, Live-Vorschau, rote Zahlen für Mitteilungen, Anheften durch Draufziehen
+- **Topbar nach deinem Geschmack** – Symbole rechts auswählen und verschieben; Klick oder Rechtsklick öffnet
+  Lautstärke, Mikrofon, Netzwerk, Schnelleinstellungen oder Benachrichtigungen
 - **Symbolleiste über der Taskbar (Beta)** – Home, Suche, Nova und Papierkorb schweben in einer eigenen Leiste,
   immer oder nur beim Drüberfahren
 - **Suche** – Apps, Systemaktionen und Win+R-Befehle schon beim Tippen, Spracheingabe und `?` für eine Frage an die KI.
   Passt nichts, schlägt die KI Aktionen vor, die erst nach deinem Ja laufen.
-- **Home-Menü** – deine angehefteten Apps, öffnet mit der Windows-Taste; einfach lostippen startet die Suche
+- **Home-Menü** – deine angehefteten Apps in einer von fünf Varianten, öffnet mit der Windows-Taste; einfach
+  lostippen startet die Suche
 - **Nova** – eine KI-Copilotin im Seitenpanel, siehe [unten](#nova)
 - **Widgets** – 13 Desktop-Widgets (Uhr, Systemanzeige, Notizen, Stoppuhr, Netzwerk, Laufwerke, Player, …), jedes mit
   eigener Größe, Farbe, Ebene und Deckkraft. Sie bleiben bei Win+D stehen.
-- **Schnelleinstellungen** – Dark Mode, Nicht stören, Bluetooth, Fokus-Timer, Audio-Ausgabe, Lautstärke jeder App mit
-  Live-Pegel
+- **Schnelleinstellungen** – Dark Mode, Nicht stören, Bluetooth, Fokus-Timer, Audio-Ausgabe und -Eingabe, Lautstärke
+  jeder App mit Live-Pegel
 - **Hintergründe** – arbeitet mit Wallpaper Engine zusammen oder spielt eigene animierte Hintergründe hinter den Symbolen
 - **PopWin-Apps** – ein Explorer mit Tabs und Vorschau, ein Editor, ein Terminal und PowerShell Studio mit Debugger;
   als Beta kann jede ihr Windows-Gegenstück ersetzen (ab Werk aus, Einstellungen → Beta)
 - **Vollbild** – Spiele und Videos haben den Bildschirm für sich, danach kommen die Leisten zurück
 - **Sicher** – die echte Windows-Taskleiste kommt zurück, wenn PopWin endet, auch nach einem Absturz
-- **Feinschliff** – Themes als reine QSS-Dateien, hell und dunkel, weiche Animationen, Deutsch, Englisch, Spanisch
-  und Französisch
+- **Feinschliff** – eingebaute und eigene Themes, hell und dunkel, weiche Animationen, drei Leistungsstufen, Deutsch,
+  Englisch, Spanisch und Französisch
 
 ## Nova
 Nova sitzt am Bildschirmrand und bleibt offen, solange du arbeitest.
@@ -82,9 +106,9 @@ Windows-Anmeldespeicher, nicht in einer Einstellungsdatei.
 ## Schnellstart
 1. **`PopWin Setup.exe`** aus den [Releases](https://github.com/michig-code/PopWin/releases) laden und starten, oder
    **`PopWin Portable.zip`** für den USB-Stick nehmen.
-2. Beim ersten Start öffnen sich die Einstellungen auf der Seite **Setup**: Autostart, Windows-Taskleiste ausblenden
-   und der optionale Gemini-Key. Jeder Schritt lässt sich jederzeit rückgängig machen. Spätere Starts öffnen keine
-   Fenster.
+2. Beim ersten Start führt eine animierte Einrichtung durch Theme, Taskbar, Nova, Leistung und Autostart. Alles lässt
+   sich später in den Einstellungen ändern, und Einstellungen → Setup startet die Einrichtung neu. Spätere Starts
+   öffnen keine Fenster, außer einmal kurz „Was ist neu“ nach einem Update.
 3. Windows-Taste für das Home-Menü, **Alt + Leertaste** für die Suche, **Strg + Alt + N** für Nova.
 
 **Beenden:** Einstellungen → Setup → *PopWin deaktivieren*, oder Notfall-Kürzel **Strg + Alt + Umschalt + K**. Ein eigener
@@ -101,25 +125,29 @@ Startmenü-Eintrag *Windows-Taskleiste wiederherstellen*.
 | KI | `? Frage` oder `ai: Frage` in der Suche, abgeschickt mit Enter |
 | KI-Aktionen | Findet die Suche nichts, schlägt die KI Aktionen vor. Sie laufen erst nach deinem Ja, mehrere als Aufgabenliste nacheinander |
 | Spracheingabe | Mikrofon-Knopf in der Suche. Die Aufnahme geht zur Erkennung an Google |
-| Lautstärke | Mausrad auf dem Lautsprecher-Symbol; Klick zeigt Regler und Ausgabegerät |
+| Lautstärke | Mausrad auf dem Lautsprecher-Symbol; Klick zeigt Regler und Ausgabe- oder Eingabegerät |
+| Mikrofon | Klick auf das Mikrofon in der Topbar: Pegel, stumm schalten und Eingabegerät |
+| Topbar-Symbole | Mit der Maus ziehen ändert die Reihenfolge; Rechtsklick öffnet dasselbe Menü wie ein Klick |
+| Themes | Einstellungen → Themes: Theme wählen oder eigenes bauen; die Übersicht wechselt es per Dropdown |
 | Papierkorb | Dateien draufziehen; Linksklick öffnet ihn; Rechtsklick zeigt Inhalt und *Leeren* |
 | Widgets | Rechtsklick auf ein Widget öffnet die Galerie: Widgets hinzufügen und jedes einzeln anpassen (Darstellung, Farbe, Größe, Ebene, Deckkraft) |
 | Anheften | Datei, Programm oder Verknüpfung auf die Taskbar ziehen, oder Rechtsklick auf eine laufende App → *An Taskbar anheften* |
 | Vorschau | Auf einem Task verweilen zeigt Live-Bild, Schließen und „Task beenden“. Tasks lassen sich mit der Maus verschieben |
 | Taskbar-Indikator | Kleiner blasser Punkt = minimiert, kurzer Strich = Fenster offen, langer farbiger Strich = aktive App |
-| Mehrere Monitore | Einstellungen → Monitore: Topbar und Taskbar auf allen, nur dem Hauptmonitor oder gezielt angekreuzten Monitoren, Aussehen synchron oder pro Monitor |
+| Mehrere Monitore | Einstellungen → Topbar oder Taskbar: auf allen, nur dem Hauptmonitor oder gezielt angekreuzten Monitoren, Aussehen synchron oder pro Monitor |
 | Uhr | Einstellungen → Uhr: ein Klick ins Bild legt fest, wo Uhrzeit und Datum stehen |
-| Schnelleinstellungen | Regler-Symbol neben der Uhr: Dark Mode, Nicht stören, Benachrichtigungen, Bluetooth, Widgets, Animationen, Fokus-Timer, PC schlafen legen |
+| Schnelleinstellungen | Regler-Symbol neben der Uhr: Dark Mode, Nicht stören, Benachrichtigungen, Bluetooth, Widgets, Animationen, Audiogeräte, Fokus-Timer, PC schlafen legen |
 | Nova | Knopf in der Taskbar oder Strg + Alt + N; Stimme, Artefakte und Verbindungen unter Einstellungen → Nova |
 | Einstellungen suchen | Oben im Einstellungsfenster tippen, oder `?` und in eigenen Worten sagen, was sich ändern soll |
-| Sprachen | Einstellungen → Design → Sprache: Deutsch, English, Español, Français oder automatisch wie Windows. Neue Sprache: Datei in `assets/lang` |
+| Sprachen | Einstellungen → Allgemein → Sprache: Deutsch, English, Español, Français oder automatisch wie Windows. Neue Sprache: Datei in `assets/lang` |
 | Hardware | PopWin erkennt Bluetooth, WLAN, Akku, Mikrofon, Lautsprecher und Kamera und zeigt nur, was vorhanden ist |
 | Datenschutz | Einstellungen → Datenschutz: was PopWin verschickt, Novas Gedächtnis ein- oder ausschalten und löschen |
 | Hintergrund | Einstellungen → Hintergrund: Wallpaper Engine wird erkannt; ohne sie spielt PopWin eigene Videos und GIFs hinter den Symbolen |
+| Leistung | Einstellungen → Leistung: Sparsam, Ausgewogen oder Schön, Spielmodus und „Windows entlasten“ |
 | Netzwerk und Performance | Speedtest mit Verlauf, Arbeitsspeicher von PopWin als Diagramm, Datei- und RAM-Cache leeren |
 | PowerShell Studio | Suche nach „PowerShell Studio“ oder „PowerShell ISE“: Debugger mit Haltepunkten, Bedingungen und Logpunkten, Befehlspalette mit Strg + Umschalt + P |
 | Beta | Einstellungen → Beta: Desktop-Gruppen, PopWin-Dateifenster, Symbolleiste über der Taskbar und PopWin-Apps einzeln umschalten |
-| Eigene Styles | Dateien in `themes/` bearbeiten, Änderungen wirken beim Speichern |
+| Eigene Themes | Einstellungen → Themes → eigenes Theme mit Live-Vorschau, oder für Profis die Dateien in `themes/` bearbeiten |
 
 ## Datenschutz
 PopWin selbst verschickt nichts. Nur was du die KI fragst (Suche, Spracheingabe, Nova), geht mit deinem eigenen Key an

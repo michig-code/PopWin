@@ -87,6 +87,29 @@ def read_volume() -> tuple[int, bool] | None:
         return None
 
 
+def _mic_volume():
+    from pycaw.pycaw import AudioUtilities
+    return AudioUtilities.CreateDevice(AudioUtilities.GetMicrophone()).EndpointVolume
+
+
+def read_mic_volume() -> tuple[int, bool] | None:
+    """Pegel und Stummschaltung des Standard-Mikrofons."""
+    try:
+        volume = _mic_volume()
+        return round(volume.GetMasterVolumeLevelScalar() * 100), bool(volume.GetMute())
+    except Exception as exc:  # z. B. kein Mikrofon angeschlossen
+        log.debug("Mikrofon nicht lesbar: %s", exc)
+        return None
+
+
+def write_mic_volume(percent: int) -> None:
+    _mic_volume().SetMasterVolumeLevelScalar(max(0, min(100, percent)) / 100, None)
+
+
+def set_mic_muted(muted: bool) -> None:
+    _mic_volume().SetMute(1 if muted else 0, None)
+
+
 def write_volume(percent: int) -> None:
     from pycaw.pycaw import AudioUtilities
     volume = AudioUtilities.GetSpeakers().EndpointVolume
@@ -97,7 +120,7 @@ def write_volume(percent: int) -> None:
 
 def short_device_name(name: str) -> str:
     """„Lautsprecher (Razer Kraken V4 X)“ sagt nur in der Klammer etwas."""
-    match = re.match(r"^(?:Lautsprecher|Speakers|Kopfhörer|Headphones|Headset)\s*\((.+)\)$", name)
+    match = re.match(r"^(?:Lautsprecher|Speakers|Kopfhörer|Headphones|Headset|Mikrofonarray|Microphone Array|Mikrofon|Microphone)\s*\((.+)\)$", name)
     return re.sub(r"^\d+- ", "", match[1]) if match else name
 
 
@@ -123,6 +146,20 @@ def audio_outputs() -> list[AudioOutput]:
         return []
     outputs = [AudioOutput(device.id, device.FriendlyName or "?", device.id == current) for device in devices]
     return sorted(outputs, key=lambda output: (not output.active, output.name.lower()))
+
+
+def audio_inputs() -> list[AudioOutput]:
+    """Mikrofone, gleich aufgebaut wie die Ausgabegeräte."""
+    from pycaw.constants import DEVICE_STATE, EDataFlow
+    from pycaw.pycaw import AudioUtilities
+    try:
+        current = AudioUtilities.GetMicrophone().GetId()
+        devices = AudioUtilities.GetAllDevices(EDataFlow.eCapture.value, DEVICE_STATE.ACTIVE.value)
+    except Exception as exc:  # z. B. kein Mikrofon angeschlossen
+        log.debug("Eingabegeräte nicht lesbar: %s", exc)
+        return []
+    inputs = [AudioOutput(device.id, device.FriendlyName or "?", device.id == current) for device in devices]
+    return sorted(inputs, key=lambda device: (not device.active, device.name.lower()))
 
 
 def set_audio_output(device_id: str) -> None:

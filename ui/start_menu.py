@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, Qt
-from PySide6.QtGui import QCursor, QIcon
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (
-    QApplication, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSizePolicy, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from core import win_api
@@ -16,6 +17,100 @@ from ui.base import G, IconButton, PopupPanel, glyph_icon, icon_for_target
 LOGO = Path(__file__).resolve().parent.parent / "assets" / "popwin.png"
 POPOVER_GAP = 6
 BAR_GAP = 14  # so weit schwebt das Menü über der Leiste
+# Aussehen des Home-Menüs: Kennung -> (Name, kurze Beschreibung)
+VARIANTS = {
+    "grid": ("Raster", "Kleine Icons mit Namen, wie bisher"),
+    "list": ("Liste", "Eine App pro Zeile, Name neben dem Icon"),
+    "tiles": ("Große Kacheln", "Drei große Kacheln pro Reihe"),
+    "strip": ("Schmale Leiste", "Nur Icons in einer Reihe, sehr kompakt"),
+    "search": ("Suche zuerst", "Suchfeld oben, darunter das Raster"),
+}
+
+
+def variant_of(config: dict) -> str:
+    value = config.get("layout", "grid")
+    return value if value in VARIANTS else "grid"
+
+
+def variant_columns(variant: str, columns: int, count: int) -> int:
+    """Spalten je Aussehen: Liste eine, Kacheln drei, Leiste alle Icons nebeneinander (höchstens acht)."""
+    if variant == "list":
+        return 1
+    if variant == "tiles":
+        return 3
+    if variant == "strip":
+        return max(1, min(8, count))
+    return max(1, columns)
+
+
+class VariantCard(QToolButton):
+    """Gemalte Skizze eines Aussehens für die Vorschau in den Einstellungen."""
+
+    def __init__(self, key: str):
+        super().__init__(objectName="ThemeCard")
+        self.key = key
+        name, hint = VARIANTS[key]
+        self.setText(name)
+        self.setToolTip(hint)
+        self.setCheckable(True)
+        self.setFixedSize(116, 110)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark = self.palette().window().color().lightness() < 128
+        ink = QColor(255, 255, 255) if dark else QColor(20, 23, 29)
+        accent = self.palette().highlight().color()
+        box = QRectF(self.rect()).adjusted(3, 3, -3, -3)
+        painter.setPen(QPen(accent if self.isChecked() else QColor(ink.red(), ink.green(), ink.blue(), 40),
+                            2.5 if self.isChecked() else 1))
+        painter.setBrush(QColor(ink.red(), ink.green(), ink.blue(), 14 if not self.underMouse() else 24))
+        painter.drawRoundedRect(box, 12, 12)
+        menu = QRectF(box.left() + 10, box.top() + 9, box.width() - 20, 64)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(ink.red(), ink.green(), ink.blue(), 26))
+        painter.drawRoundedRect(menu, 8, 8)
+        dot = QColor(ink.red(), ink.green(), ink.blue(), 150)
+        soft = QColor(ink.red(), ink.green(), ink.blue(), 70)
+        left, top, width = menu.left() + 7, menu.top() + 7, menu.width() - 14
+        if self.key in ("grid", "search"):
+            if self.key == "search":
+                painter.setBrush(soft)
+                painter.drawRoundedRect(QRectF(left, top, width, 9), 4.5, 4.5)
+                top += 14
+            painter.setBrush(dot)
+            for row in range(2 if self.key == "search" else 3):
+                for column in range(4):
+                    painter.drawRoundedRect(QRectF(left + column * (width / 4) + 3, top + row * 17, width / 4 - 8, 11), 3, 3)
+        elif self.key == "list":
+            for row in range(4):
+                painter.setBrush(dot)
+                painter.drawRoundedRect(QRectF(left, top + row * 14, 9, 9), 2, 2)
+                painter.setBrush(soft)
+                painter.drawRoundedRect(QRectF(left + 14, top + row * 14 + 2, width * 0.6, 5), 2.5, 2.5)
+        elif self.key == "tiles":
+            painter.setBrush(dot)
+            for row in range(2):
+                for column in range(3):
+                    painter.drawRoundedRect(QRectF(left + column * (width / 3) + 2, top + row * 28, width / 3 - 5, 23), 5, 5)
+        else:
+            painter.setBrush(dot)
+            for column in range(6):
+                painter.drawRoundedRect(QRectF(left + column * (width / 6) + 1, top + 20, width / 6 - 4, width / 6 - 4), 3, 3)
+        painter.setPen(ink)
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(QRectF(box.left(), box.bottom() - 30, box.width(), 26), Qt.AlignmentFlag.AlignCenter, self.text())
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self.update()
 
 
 class Popover(QWidget):
@@ -69,6 +164,16 @@ class StartMenu(PopupPanel):
         header.addWidget(files)
         header.addWidget(self.settings)
         self.body.addLayout(header)
+
+        self.search_bar = QPushButton(glyph_icon(G.SEARCH, 15, "#FFFFFF"), "  Apps, Dateien und Einstellungen suchen",
+                                      objectName="SearchField")
+        self.search_bar.setProperty("searchStyle", "pill")
+        self.search_bar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.search_bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.search_bar.setMinimumHeight(34)
+        self.search_bar.clicked.connect(lambda: (self.dismiss(), ctx.launcher.open()))
+        self.search_bar.hide()
+        self.body.addWidget(self.search_bar)
 
         self.grid_host = QWidget()
         self.grid = QGridLayout(self.grid_host)
@@ -131,23 +236,45 @@ class StartMenu(PopupPanel):
             tile = self.grid.takeAt(0).widget()
             tile.hide()
             tile.deleteLater()
-        columns = max(1, config["columns"])
-        icon_size = config["icon_size"]
+        variant = variant_of(config)
+        pinned = config["pinned"]
+        columns = variant_columns(variant, config["columns"], len(pinned))
+        icon_size = {"list": 24, "tiles": max(48, config["icon_size"]), "strip": min(32, config["icon_size"])}.get(
+            variant, config["icon_size"])
+        width = config["width"]
+        if variant == "strip":
+            width = max(280, columns * (icon_size + 26) + 30)
         color = self._color()
-        for index, app in enumerate(config["pinned"]):
-            tile = QToolButton(objectName="AppTile")
-            tile.setText(app["name"])
-            tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.search_bar.setVisible(variant == "search")
+        self.search_bar.setIcon(glyph_icon(G.SEARCH, 15, color))
+        self.grid.setSpacing(2 if variant == "list" else 8 if variant == "tiles" else 4)
+        for index, app in enumerate(pinned):
+            tile = QToolButton(self.grid_host, objectName="WindowRow" if variant == "list" else "AppTile")
+            tile.setText(("   " + app["name"]) if variant == "list" else app["name"])  # Abstand zum Icon
             tile.setIconSize(QSize(icon_size, icon_size))
-            tile.setFixedWidth(max(64, (config["width"] - 24) // columns - 4))
+            if variant == "list":
+                tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+                tile.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                tile.setMinimumHeight(36)
+                tile.setStyleSheet("QToolButton { text-align: left; padding: 4px 10px; }")
+            elif variant == "strip":
+                tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+                tile.setFixedSize(icon_size + 20, icon_size + 18)
+            else:
+                tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+                tile.setFixedWidth(max(64, (width - 24) // columns - 4))
+                if variant == "tiles":
+                    tile.setFixedHeight(icon_size + 50)
+                    tile.setStyleSheet("QToolButton { background: rgba(128, 128, 128, 0.13); border-radius: 14px; }"
+                                       "QToolButton:hover { background: rgba(128, 128, 128, 0.26); }")
             icon = icon_for_target(app["target"])
             tile.setIcon(glyph_icon(G.APP, icon_size, color) if icon.isNull() else icon)
-            tile.setToolTip(app["target"])
+            tile.setToolTip(app["name"] if variant == "strip" else app["target"])
             tile.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             tile.clicked.connect(lambda _=False, t=app["target"]: (self.dismiss(), launch(self.ctx, t)))
             self.grid.addWidget(tile, index // columns, index % columns)
             tile.show()  # Wer das Menü beim Ausblenden wieder öffnet: Sonst zählt die Kachel bei der Größe noch nicht mit
-        self.setFixedWidth(config["width"])
+        self.setFixedWidth(width)
 
     def toggle(self, anchor: QWidget | None) -> None:
         if self.isVisible() and not self.animator.closing:
@@ -164,6 +291,7 @@ class StartMenu(PopupPanel):
         self.adjustSize()
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         self.move(screen.availableGeometry().center() - self.rect().center())
+        self.setWindowOpacity(0)
         self.show()
         win_api.force_foreground(int(self.winId()))
         self.activateWindow()

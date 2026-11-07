@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QSi
 
 from core import quick_settings as qs
 from core import win_api
-from ui.audio_outputs import AudioOutputs
+from ui.audio_outputs import AudioDevices
 from ui.base import G, IconButton, PopupPanel, glyph_icon
 
 FOCUS_MINUTES = (15, 25, 45, 60)
@@ -44,7 +44,7 @@ class QuickPanel(PopupPanel):
             ("nova", G.NOVA, "Nova", lambda: ctx.nova.running, lambda _on: ctx.nova.toggle()),
         )
         for index, (key, glyph, label, read, write) in enumerate(definitions):
-            tile = QToolButton(objectName="QuickTile")
+            tile = QToolButton(self.panel, objectName="QuickTile")  # mit Eltern: nie kurz ein eigenes Fenster
             tile.setCheckable(True)
             tile.setText(label)
             tile.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
@@ -57,8 +57,8 @@ class QuickPanel(PopupPanel):
         self._place_tiles()
         self.body.addLayout(grid)
 
-        self.outputs_title = QLabel("Ausgabegerät", objectName="PanelTitle")
-        self.outputs = AudioOutputs(OUTPUT_ROWS)
+        self.outputs_title = QLabel("Audiogeräte", objectName="PanelTitle")
+        self.outputs = AudioDevices(OUTPUT_ROWS)  # Leiste: Ausgabe | Eingabe
         self.outputs.failed.connect(self.outputs_title.setText)
         self.body.addWidget(self.outputs_title)
         self.body.addWidget(self.outputs)
@@ -99,17 +99,19 @@ class QuickPanel(PopupPanel):
 
     def _place_tiles(self) -> None:
         """Ohne Lücken: Fehlt Bluetooth, rückt der Rest nach."""
-        shown = [tile for key, (tile, _read, _glyph) in self.tiles.items() if key not in TILE_NEEDS or self.ctx.has_feature(TILE_NEEDS[key])]
+        shown = [tile for key, (tile, _read, _glyph) in self.tiles.items()
+                 if (key not in TILE_NEEDS or self.ctx.has_feature(TILE_NEEDS[key])) and (key != "nova" or self.ctx.nova_enabled())]
         for tile, _read, _glyph in self.tiles.values():
             self.grid.removeWidget(tile)
-            tile.setVisible(tile in shown)
+            if tile not in shown:
+                tile.hide()
         for index, tile in enumerate(shown):
             self.grid.addWidget(tile, index // 3, index % 3)
+            tile.show()  # erst einsortieren, dann zeigen
 
     def show_at(self, anchor) -> None:
-        self.outputs_title.setText("Ausgabegerät")
+        self.outputs_title.setText("Audiogeräte")
         self.outputs.refresh()
-        self.outputs_title.setVisible(self.outputs.count() > 1)
         super().show_at(anchor)
 
     def refresh(self) -> None:

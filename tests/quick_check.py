@@ -137,7 +137,7 @@ def steps(ctx, app):
     check("Ablauf beendet den Timer und Nicht stören", not ctx.focus.active and not qs.do_not_disturb())
     ctx.focus._manager = manager
 
-    window_page = ctx.settings.monitor_page
+    window_page = ctx.settings.topbar_page
     ctx.config.set_monitor(None, "dock_height", 80)
     ctx.settings._fill_monitors()
     yield 300

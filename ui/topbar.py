@@ -5,8 +5,9 @@ import getpass
 import os
 import subprocess
 
-from PySide6.QtCore import QDateTime, QLocale, Qt, QTimer
-from PySide6.QtWidgets import QBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+from PySide6.QtCore import QDateTime, QEasingCurve, QEvent, QLocale, QPoint, QPropertyAnimation, Qt, QTimer
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider,
+                               QVBoxLayout, QWidget)
 
 from core import hardware, system_status, win_api
 from core.net_stats import NameLoader
@@ -14,7 +15,9 @@ from core.monitor_manager import native_point, native_rect
 from core.notifications import visible_notices
 from core.quick_settings import format_remaining
 from core.replacements import launch
-from ui.audio_outputs import AudioOutputs
+from ui.account_panel import AccountPanel
+from ui.animation import duration_of
+from ui.audio_outputs import AudioDevices, AudioOutputs
 from ui.base import BarWindow, G, IconButton, NovaButton, PopupPanel, set_prop, themed_menu
 from ui.quick_panel import QuickPanel
 from ui.window_panel import WindowPanel
@@ -39,15 +42,27 @@ def format_center(now: QDateTime, seconds: bool, style: str = "both") -> str:
     return QLocale().toString(now, {"time": time, "date": "ddd, d. MMMM"}.get(style, "ddd, d. MMMM   " + time))
 
 
+KEYBOARD_GLYPH = ""
+SNIP_GLYPH = ""  # Schere
+
+
+def language_label(short: str, layouts: int) -> str:
+    """Text der Sprachanzeige; leer, wenn es nichts umzuschalten gibt oder Windows keinen Namen liefert."""
+    return short if short and layouts > 1 else ""
+
+
 # Symbole rechts in der Topbar: Kennung -> (Einstellung fürs Anzeigen, Name, Zeichen)
 TOP_ITEMS = {
     "tray": ("show_tray", "Versteckte Symbole", G.CHEVRON_UP),
     "cloud": ("show_cloud", "Cloud-Synchronisierung", G.CLOUD),
     "mic": ("show_mic", "Mikrofon", G.MIC),
+    "lang": ("show_language", "Tastatur-Sprache", KEYBOARD_GLYPH),
     "network": ("show_network", "Netzwerk", G.ETHERNET),
     "bluetooth": ("show_bluetooth", "Bluetooth", G.BLUETOOTH),
     "battery": ("show_battery", "Akku", G.BATTERY),
     "volume": ("show_volume", "Lautstärke", G.VOLUME),
+    "project": ("show_project", "Bildschirm projizieren", G.DISPLAY),
+    "snip": ("show_snip", "Ausschneiden (Screenshot)", SNIP_GLYPH),
     "quick": ("show_quick", "Schnelleinstellungen", G.QUICK),
     "nova": ("show_nova", "Nova", G.NOVA),
     "bell": ("show_notifications", "Benachrichtigungen", G.BELL),
@@ -71,6 +86,84 @@ def complete_order(order: list[str]) -> list[str]:
 
 
 OUTPUT_ROWS = 7
+TOP_GLIDE_MS = 170
+# Rechtsklick öffnet bei diesen Symbolen dasselbe wie ein Linksklick (Bluetooth hat ein eigenes Rechtsklick-Ziel)
+RIGHT_CLICK_OPENS = ("tray", "cloud", "mic", "network", "battery", "volume", "project", "quick", "nova", "bell")
+
+
+class MicPopup(PopupPanel):
+    """Wie das Lautstärke-Fenster, nur fürs Mikrofon: Pegel, stumm, Eingabegerät."""
+
+    def __init__(self, ctx, theme_name: str):
+        super().__init__(ctx, theme_name)
+        self.setFixedWidth(280)
+        head = QHBoxLayout()
+        self.label = QLabel("Mikrofon", objectName="PanelTitle")
+        head.addWidget(self.label, 1)
+        self.mute = IconButton(G.MIC, "Stumm schalten")
+        self.mute.setCheckable(True)
+        self.mute.clicked.connect(self._toggle_mute)
+        head.addWidget(self.mute)
+        self.body.addLayout(head)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, 100)
+        self.slider.valueChanged.connect(self._changed)
+        self.body.addWidget(self.slider)
+        self.users = QLabel(objectName="Muted")
+        self.users.setWordWrap(True)
+        self.body.addWidget(self.users)
+        self.inputs_title = QLabel("Eingabegerät", objectName="Muted")
+        self.inputs = AudioOutputs(OUTPUT_ROWS, "in", hide_single=False)
+        self.inputs.switched.connect(self.load)
+        self.inputs.failed.connect(self.inputs_title.setText)
+        self.body.addWidget(self.inputs_title)
+        self.body.addWidget(self.inputs)
+        privacy = QPushButton("Mikrofon-Einstellungen", objectName="Secondary")
+        privacy.clicked.connect(lambda: (self.dismiss(), win_api.shell_open("ms-settings:sound")))
+        self.body.addWidget(privacy)
+
+    def load(self, users: list | None = None) -> None:
+        if users is not None:
+            self.users.setText("Gerade aktiv: " + ", ".join(users) if users else "Keine App nutzt das Mikrofon.")
+        state = system_status.read_mic_volume()
+        self.slider.setEnabled(state is not None)
+        self.mute.setEnabled(state is not None)
+        if state is None:
+            self.label.setText("Kein Mikrofon gefunden")
+            return
+        value, muted = state
+        self.slider.blockSignals(True)
+        self.slider.setValue(value)
+        self.slider.blockSignals(False)
+        self.mute.setChecked(muted)
+        self._title(value, muted)
+
+    def _title(self, value: int, muted: bool) -> None:
+        self.label.setText("Mikrofon stumm" if muted else f"Mikrofon {value} %")
+        self.mute.setText(G.MIC_OFF if muted else G.MIC)
+        self.mute.setToolTip("Stummschaltung aufheben" if muted else "Stumm schalten")
+
+    def show_at(self, anchor) -> None:
+        self.inputs_title.setText("Eingabegerät")
+        self.inputs.refresh()
+        self.inputs_title.setVisible(self.inputs.count() > 0)
+        super().show_at(anchor)
+
+    def _changed(self, value: int) -> None:
+        try:
+            system_status.write_mic_volume(value)
+        except Exception as exc:  # Gerät eben abgesteckt
+            self.label.setText(f"Mikrofon nicht erreichbar: {exc}")
+            return
+        self._title(value, self.mute.isChecked())
+
+    def _toggle_mute(self, muted: bool) -> None:
+        try:
+            system_status.set_mic_muted(muted)
+        except Exception as exc:
+            self.label.setText(f"Mikrofon nicht erreichbar: {exc}")
+            return
+        self._title(self.slider.value(), muted)
 
 
 class VolumePopup(PopupPanel):
@@ -83,8 +176,8 @@ class VolumePopup(PopupPanel):
         self.slider.valueChanged.connect(self._changed)
         self.body.addWidget(self.label)
         self.body.addWidget(self.slider)
-        self.outputs_title = QLabel("Ausgabegerät", objectName="Muted")
-        self.outputs = AudioOutputs(OUTPUT_ROWS)
+        self.outputs_title = QLabel("Audiogeräte", objectName="Muted")
+        self.outputs = AudioDevices(OUTPUT_ROWS)
         self.outputs.switched.connect(self._switched)
         self.outputs.failed.connect(self.outputs_title.setText)
         self.body.addWidget(self.outputs_title)
@@ -94,9 +187,8 @@ class VolumePopup(PopupPanel):
         self.body.addWidget(mixer)
 
     def show_at(self, anchor) -> None:
-        self.outputs_title.setText("Ausgabegerät")
+        self.outputs_title.setText("Audiogeräte")
         self.outputs.refresh()
-        self.outputs_title.setVisible(self.outputs.count() > 1)
         super().show_at(anchor)
 
     def _switched(self) -> None:
@@ -204,6 +296,12 @@ class TopBar(BarWindow):
         self._network_popup: NetworkPopup | None = None
         self._quick_popup: QuickPanel | None = None
         self._window_popup: WindowPanel | None = None
+        self._account_popup: AccountPanel | None = None
+        self._mic_popup: MicPopup | None = None
+        self._top_press: tuple[str, QPoint] | None = None
+        self._top_drag = ""
+        self._top_grab = QPoint()
+        self._top_glides: dict = {}
         self._state: dict = {}
         self._workspace_signature = None
 
@@ -213,8 +311,8 @@ class TopBar(BarWindow):
 
         self.user = QPushButton(_user_name(), objectName="UserLabel")
         self.user.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.user.setToolTip("Aktive Fenster")
-        self.user.clicked.connect(self._show_window_menu)
+        self.user.setToolTip("Benutzer")
+        self.user.clicked.connect(self._user_clicked)
         self.workspaces = QHBoxLayout()
         self.workspaces.setSpacing(2)
         row.addWidget(self.user)
@@ -233,7 +331,7 @@ class TopBar(BarWindow):
         self.cloud = IconButton(G.CLOUD, "Cloud-Synchronisierung")
         self.cloud.clicked.connect(self._open_cloud)
         self.mic = IconButton(G.MIC, "Mikrofon wird nicht verwendet")
-        self.mic.clicked.connect(lambda: win_api.shell_open("ms-settings:privacy-microphone"))
+        self.mic.clicked.connect(self._show_mic)
         self.network = IconButton(G.ETHERNET, "Netzwerk")
         self.network.clicked.connect(self._show_network)
         self.bluetooth = BluetoothButton(G.BLUETOOTH, "Bluetooth")
@@ -243,6 +341,17 @@ class TopBar(BarWindow):
         self.battery_level = QLabel(objectName="ClockDate")
         self.volume = VolumeButton(self._change_volume)
         self.volume.clicked.connect(self._show_volume)
+        # Sprachanzeige wie „DEU“: zeigt die Tastatur des Fensters im Vordergrund, ein Klick schaltet weiter
+        self.lang = QPushButton("", objectName="UserLabel")
+        self.lang.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.lang.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lang.setToolTip("Tastatur-Sprache wechseln")
+        self.lang.clicked.connect(self._next_language)
+        self._lang_window = 0
+        self.project = IconButton(G.DISPLAY, "Bildschirm projizieren")
+        self.project.clicked.connect(win_api.open_projection)
+        self.snip = IconButton(SNIP_GLYPH, "Ausschneiden (Screenshot)")
+        self.snip.clicked.connect(win_api.open_snipping)
 
         self.focus_time = QLabel(objectName="ClockDate")
         self.focus_time.hide()
@@ -256,11 +365,18 @@ class TopBar(BarWindow):
         self.status_row = QHBoxLayout()
         self.status_row.setSpacing(2)
         row.addLayout(self.status_row)
-        self._items = {"tray": [self.chevron], "cloud": [self.cloud], "mic": [self.mic], "network": [self.network],
+        self._items = {"tray": [self.chevron], "cloud": [self.cloud], "mic": [self.mic], "lang": [self.lang], "network": [self.network],
                        "bluetooth": [self.bluetooth], "battery": [self.battery, self.battery_level], "volume": [self.volume],
+                       "project": [self.project], "snip": [self.snip],
                        "quick": [self.focus_time, self.quick], "nova": [self.nova], "bell": [self.bell, self.bell_count]}
         self._arranged: list[str] = []
         self._layout = (self.bar_size(), self.auto_hides())
+        # Ohne Eltern wäre jedes Icon kurz ein eigenes kleines Fenster, sobald es vor dem Einsortieren sichtbar wird
+        for widgets in self._items.values():
+            for widget in widgets:
+                if widget.parent() is None:
+                    widget.setParent(self.root)
+                    widget.hide()
 
         self.clock = QWidget()
         self.clock_box = QBoxLayout(QBoxLayout.Direction.TopToBottom, self.clock)
@@ -288,6 +404,7 @@ class TopBar(BarWindow):
 
     def set_theme_name(self, name: str) -> None:
         self._volume_popup = self._network_popup = self._quick_popup = self._window_popup = None  # entstehen neu
+        self._account_popup = self._mic_popup = None
         super().set_theme_name(name)
 
     def on_meta_changed(self, meta: dict) -> None:
@@ -298,6 +415,11 @@ class TopBar(BarWindow):
         return self.option("topbar_height") or super().bar_size()
 
     def contextMenuEvent(self, event) -> None:
+        child = self.root.childAt(self.root.mapFromGlobal(event.globalPos()))
+        key = self._item_key(child)
+        if key in RIGHT_CLICK_OPENS and child.isEnabled():
+            child.click()  # Rechtsklick auf ein Symbol öffnet sein Menü, nicht das der Leiste
+            return
         menu = themed_menu(self.ctx, self, self.theme_name)
         action = menu.addAction("Automatisch ausblenden")
         action.setCheckable(True)
@@ -315,15 +437,98 @@ class TopBar(BarWindow):
         self.time_label.setVisible(self.option("clock_style") != "date")
         self.date_label.setVisible(self.option("clock_style") != "time")
 
-    def _arrange_items(self) -> None:
-        order = complete_order(self.option("top_order"))
+    def _arrange_items(self, order: list[str] | None = None, animate: bool = False) -> None:
+        order = complete_order(order if order is not None else self.option("top_order"))
         if order == self._arranged:
             return
+        before = {widget: widget.pos() for widgets in self._items.values() for widget in widgets if widget.isVisible()}
         self._arranged = order
         for item in order:
             for widget in self._items[item]:
                 self.status_row.removeWidget(widget)
                 self.status_row.addWidget(widget)
+                if isinstance(widget, QAbstractButton) and widget.property("topDrag") is None:
+                    widget.setProperty("topDrag", True)
+                    widget.installEventFilter(self)  # mit der Maus verschiebbar, wie die Knöpfe der Taskbar
+        if animate and duration_of(self.ctx.config):
+            self.root.layout().activate()
+            held = self._items[self._top_drag][0] if self._top_drag else None
+            for widget, old in before.items():
+                if widget is not held:
+                    self._top_glide(widget, old)
+
+    # --- Symbole oben umstellen ---------------------------------------------------------------------
+    def _item_key(self, widget) -> str:
+        if not isinstance(widget, QAbstractButton):
+            return ""
+        return next((key for key, widgets in self._items.items() if widget in widgets), "")
+
+    def _top_glide(self, widget: QWidget, start: QPoint) -> None:
+        end = widget.pos()
+        if start == end:
+            return
+        animation = self._top_glides.get(widget)
+        if animation is None:
+            animation = self._top_glides[widget] = QPropertyAnimation(widget, b"pos", self)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            animation.setDuration(TOP_GLIDE_MS)
+        animation.stop()
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.start()
+
+    def eventFilter(self, watched, event) -> bool:
+        key = self._item_key(watched)
+        if not key:
+            return super().eventFilter(watched, event)
+        kind = event.type()
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._top_press = (key, event.globalPosition().toPoint())
+        elif kind == QEvent.Type.MouseMove and self._top_press and self._top_press[0] == key:
+            point = event.globalPosition().toPoint()
+            if not self._top_drag and (point - self._top_press[1]).manhattanLength() >= QApplication.startDragDistance():
+                self._top_drag = key
+                self._top_grab = point - watched.mapToGlobal(QPoint(0, 0))
+                watched.raise_()
+                watched.setDown(False)
+            if self._top_drag:
+                self._drag_top(watched, point)
+                return True
+        elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            dragged = self._top_drag
+            self._top_press = None
+            if dragged:
+                self._finish_top(watched)
+                return True  # kein Klick nach dem Ziehen
+        return super().eventFilter(watched, event)
+
+    def _drag_top(self, widget: QWidget, point: QPoint) -> None:
+        local = widget.parentWidget().mapFromGlobal(point - self._top_grab)
+        widget.move(local.x(), widget.y())
+        mine = widget.mapToGlobal(widget.rect().center()).x()
+        centers = []
+        for key in self._arranged:
+            if key == self._top_drag:
+                continue
+            shown = [w for w in self._items[key] if w.isVisible()]
+            if shown:
+                centers.append((key, shown[0].mapToGlobal(shown[0].rect().center()).x()))
+        place = sum(mine > x for _key, x in centers)
+        anchor = centers[place - 1][0] if place > 0 else None
+        order = [key for key in self._arranged if key != self._top_drag]
+        order.insert(order.index(anchor) + 1 if anchor else 0, self._top_drag)
+        if order != self._arranged:
+            held = widget.pos()
+            self._arrange_items(order, animate=True)
+            widget.move(held)  # bleibt unter der Maus, die anderen machen Platz
+
+    def _finish_top(self, widget: QWidget) -> None:
+        start = widget.pos()
+        self._top_drag = ""
+        self.root.layout().activate()
+        self._top_glide(widget, start)
+        if self._arranged != complete_order(self.option("top_order")):
+            self.ctx.config.set_monitor(self.screen_id, "top_order", list(self._arranged))
 
     def _show_cloud(self) -> None:
         running = bool(self._state.get("cloud"))
@@ -347,14 +552,19 @@ class TopBar(BarWindow):
             self.battery.setToolTip(f"Akku {percent} %, lädt" if charging else f"Akku {percent} %")
 
     def _on_config(self, key: str) -> None:
+        if key == "nova.enabled":
+            key = "profile"
         if key == "hide_missing_hardware":
             self._apply_items()
         if key == "profile":
             self.user.setVisible(self.option("show_user"))
             self.quick.setVisible(self.option("show_quick"))
-            self.nova.setVisible(self.option("show_nova"))
+            self.nova.setVisible(self.option("show_nova") and self.ctx.nova_enabled())
             self.chevron.setVisible(self.option("show_tray"))
             self.network.setVisible(self.option("show_network"))
+            self.project.setVisible(self.option("show_project"))
+            self.snip.setVisible(self.option("show_snip"))
+            self._update_language()
             self._apply_items()
             self._show_cloud()
             self._arrange_items()
@@ -365,6 +575,7 @@ class TopBar(BarWindow):
                 self.reposition()
                 self._sync_auto_hide()
             self.user.setEnabled(self.option("show_windows"))
+            self.user.setToolTip("Benutzer" if self.option("user_click") == "account" else "Aktive Fenster")
             self._workspace_signature = None
             self._tick()
             self._update_workspaces(self.ctx.status.state["desktops"])
@@ -379,7 +590,30 @@ class TopBar(BarWindow):
         self.bell_count.setText(str(count))
         self.bell_count.setVisible(shown and count > 0 and self.ctx.config.get("notifications.show_count"))
 
+    def _update_language(self) -> None:
+        hwnd = win_api.foreign_foreground()
+        if hwnd:
+            self._lang_window = hwnd  # beim Klick auf die Topbar zählt das Fenster davor
+        text = ""
+        if self.option("show_language") and self._lang_window:
+            short = win_api.language_short(win_api.keyboard_language(self._lang_window))
+            text = language_label(short, win_api.keyboard_language_count())
+        if self.lang.text() != text:
+            self.lang.setText(text)
+        self.lang.setVisible(bool(text))
+
+    def _next_language(self) -> None:
+        if win_api.next_keyboard_language(self._lang_window):
+            QTimer.singleShot(300, self._update_language)
+
+    def peek(self) -> None:
+        super().peek()
+        self._tick()
+
     def _tick(self) -> None:
+        if self.behind_game():
+            return  # im Spiel nicht jede Sekunde Uhr, Titel und Sprache abfragen
+        self._update_language()
         now, date = format_clock(QDateTime.currentDateTime(), self.option("clock_seconds"))
         self.time_label.setText(now)
         self.date_label.setText(date)
@@ -451,6 +685,15 @@ class TopBar(BarWindow):
             chip.setToolTip(f"Arbeitsfläche {index + 1}")
             chip.clicked.connect(lambda _=False, i=index: win_api.switch_virtual_desktop(i - current))
             self.workspaces.addWidget(chip)
+
+    def _user_clicked(self) -> None:
+        """Oben links: Benutzer-Bereich (Standard) oder wie früher gleich die offenen Fenster."""
+        if self.option("user_click") == "windows":
+            self._show_window_menu()
+            return
+        if self._account_popup is None:
+            self._account_popup = AccountPanel(self.ctx, self.theme_name, self._show_window_menu)
+        self._account_popup.open_at(self.user)
 
     def _show_window_menu(self) -> None:
         if self._window_popup is None:
@@ -527,6 +770,12 @@ class TopBar(BarWindow):
             self._volume_popup = VolumePopup(self.ctx, self.theme_name)
         self._volume_popup.set_value(self._state.get("volume") or 0)
         self._volume_popup.toggle_at(self.volume)
+
+    def _show_mic(self) -> None:
+        if self._mic_popup is None:
+            self._mic_popup = MicPopup(self.ctx, self.theme_name)
+        self._mic_popup.load(list(self._state.get("mic") or []))
+        self._mic_popup.toggle_at(self.mic)
 
     def _show_network(self) -> None:
         if self._network_popup is None:

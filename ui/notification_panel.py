@@ -8,7 +8,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from core import win_api
+from core import quick_settings, win_api
 from core.notifications import Notice, app_name, format_age, visible_notices
 from ui.base import G, IconButton, PopupPanel, glyph_icon, icon_for_target
 
@@ -85,7 +85,24 @@ class NotificationPanel(PopupPanel):
         area.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
         area.setWidget(self.content)
         self.body.addWidget(area, 1)
+        # Ganz unten: „Nicht stören“ direkt hier umschalten, ohne erst die Schnelleinstellungen zu öffnen
+        self.quiet = QPushButton(objectName="Secondary")
+        self.quiet.setCheckable(True)
+        self.quiet.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quiet.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.quiet.clicked.connect(self._set_quiet)
+        self.body.addWidget(self.quiet)
         ctx.notifications.updated.connect(self._on_update)
+
+    def _show_quiet(self, on: bool) -> None:
+        self.quiet.setChecked(on)
+        self.quiet.setText("Nicht stören ist an" if on else "Nicht stören")
+        self.quiet.setIcon(glyph_icon(G.QUIET, 16, "#FFFFFF" if self.ctx.theme.mode == "dark" else "#202020"))
+
+    def _set_quiet(self, on: bool) -> None:
+        if not quick_settings.set_do_not_disturb(on):
+            on = not on  # Windows hat abgelehnt: Knopf zeigt weiter den echten Zustand
+        self._show_quiet(on)
 
     def _visible(self) -> list[Notice]:
         return visible_notices(self.ctx.notifications.notices, self.ctx.config.get("notifications.hidden"))
@@ -148,6 +165,7 @@ class NotificationPanel(PopupPanel):
         config = self.ctx.config.get("notifications")
         now = datetime.now().astimezone()
         self.count.setText(str(len(notices)) if notices else "")
+        self._show_quiet(quick_settings.do_not_disturb())
         self.clear.setVisible(bool(notices))
         if config["group"]:
             order = {}

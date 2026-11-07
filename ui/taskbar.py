@@ -1,18 +1,21 @@
 """Dock: Start, angeheftete und laufende Apps, Now Playing, Papierkorb."""
 from __future__ import annotations
 
+import math
 import os
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPainter, QPainterPath, QPixmap, QRegion
 from PySide6.QtWidgets import (
-    QApplication, QBoxLayout, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QVBoxLayout, QWidget,  # [Antigravity]
+    QAbstractButton, QApplication, QBoxLayout, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QVBoxLayout, QWidget,  # [Antigravity]
 )
 
 from core import win_api
 from core.monitor_manager import native_rect
+from ui.animation import duration_of
+from core.notifications import badge_count, badge_text, notice_labels, visible_notices
 from core.replacements import launch, taskbar_slot
 from core.dev import is_dev
 from ui.claude_button import ClaudeButton, is_claude_window
@@ -268,6 +271,50 @@ class Trash(IconButton):
         win_api.force_foreground(int(menu.winId()))
 
 
+MAGNIFY_TOP = 1.4  # so viel größer wird das Icon direkt unter der Maus
+MAGNIFY_REACH = 2.5  # so viele Icon-Breiten weit wirkt die Vergrößerung zur Seite
+MAGNIFY_MS = 16
+APPROACH_MS = 90  # so oft schaut die Taskbar, ob die Maus näher kommt, solange die Vergrößerung an ist
+APPROACH_ZONE = 1.6  # ab so vielen Leistenhöhen Abstand beginnen die Icons zu wachsen
+FIXED_KEYS = ("start", "search", "apps", "media", "nova", "trash", "desktop")
+FIXED_GLIDE_MS = 170
+
+
+def dock_order_of(value) -> list[str]:
+    """Bereinigte Reihenfolge der festen Knöpfe: Unbekanntes fällt weg, Fehlendes kommt an seinen Standardplatz."""
+    order = [key for key in dict.fromkeys(value or []) if key in FIXED_KEYS]
+    for index, key in enumerate(FIXED_KEYS):
+        if key not in order:
+            before = [k for k in FIXED_KEYS[:index] if k in order]
+            order.insert(order.index(before[-1]) + 1 if before else 0, key)
+    return order
+
+
+def nearness(cursor_x: int, cursor_y: int, left: int, top: int, right: int, bottom: int, edge: str, zone: float,
+             side_reach: float) -> float:
+    """0 = weit weg, 1 = auf der Leiste. Zählt nur der Abstand zur Bildschirmseite hin (von oben bei unten
+    liegender Taskbar); seitlich gilt ein Streifen in Breite der Leiste plus `side_reach`."""
+    if edge in ("left", "right"):
+        if not top - side_reach <= cursor_y <= bottom + side_reach:
+            return 0.0
+        distance = (cursor_x - right) if edge == "left" else (left - cursor_x)
+    else:
+        if not left - side_reach <= cursor_x <= right + side_reach:
+            return 0.0
+        distance = (top - cursor_y) if edge == "bottom" else (cursor_y - bottom)
+    if distance <= 0:  # auf der Leiste oder zwischen ihr und dem Bildschirmrand
+        return 1.0
+    value = max(0.0, 1.0 - distance / max(zone, 1.0))
+    return value * value * (3 - 2 * value)  # weich hinein, kein Ruck an der Grenze
+
+
+def magnify_scale(distance: float, reach: float, top: float = MAGNIFY_TOP) -> float:
+    """Wie am Mac: direkt unter der Maus am größten, zur Seite weich abfallend, ab `reach` normal groß."""
+    if reach <= 0 or distance >= reach:
+        return 1.0
+    return 1.0 + (top - 1.0) * 0.5 * (1.0 + math.cos(math.pi * max(0.0, distance) / reach))
+
+
 def mark_y(button_top: int, button_height: int, icon: int, bar_height: int, mark: int) -> float:
     """Genau mittig zwischen Unterkante des Icons und Rand der Leiste."""
     icon_bottom = button_top + (button_height + icon) / 2
@@ -342,17 +389,38 @@ class TaskButton(QPushButton):
         y = mark_y(origin.y(), self.height(), self.iconSize().height(), bar_height, height)
         painter.drawRoundedRect(QRectF(x, y, width, height), height / 2, height / 2)
 
+    BADGE_COLOR = "#E5484D"
+
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
-        if self.property("running") and self.dock.task_counts and len(self.windows) > 1:
+        counts = self.property("running") and self.dock.task_counts and len(self.windows) > 1
+        if counts or self.badge:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
-            self._paint_count(painter, self.mark_color()[1])
+            if counts:  # mit rotem Punkt wandert die Fensterzahl nach links oben
+                self._paint_count(painter, self.mark_color()[1], left=bool(self.badge))
+            if self.badge:
+                self._paint_badge(painter)
             painter.end()
 
-    def _paint_count(self, painter: QPainter, color: QColor) -> None:
-        box = QRectF(self.width() - self.COUNT_SIZE - 1, 1, self.COUNT_SIZE, self.COUNT_SIZE)
+    def _paint_badge(self, painter: QPainter) -> None:
+        """Roter Punkt mit der Zahl ungelesener Benachrichtigungen, wie bei Handy-Apps."""
+        font = painter.font()
+        font.setPixelSize(10)
+        font.setBold(True)
+        painter.setFont(font)
+        width = max(self.COUNT_SIZE, painter.fontMetrics().horizontalAdvance(self.badge) + 6)
+        box = QRectF(self.width() - width - 1, 1, width, self.COUNT_SIZE)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self.BADGE_COLOR))
+        painter.drawRoundedRect(box, self.COUNT_SIZE / 2, self.COUNT_SIZE / 2)
+        painter.setPen(QColor("#FFFFFF"))
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, self.badge)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+    def _paint_count(self, painter: QPainter, color: QColor, left: bool = False) -> None:
+        box = QRectF(1 if left else self.width() - self.COUNT_SIZE - 1, 1, self.COUNT_SIZE, self.COUNT_SIZE)
         painter.setBrush(color)
         painter.drawEllipse(box)
         font = painter.font()
@@ -369,6 +437,7 @@ class TaskButton(QPushButton):
         self.windows: list[win_api.WindowInfo] = []
         self.target = ""
         self.name = ""
+        self.badge = ""  # Text im roten Punkt, leer = kein Punkt
         self._press: QPoint | None = None
         self._dragging = False
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -391,6 +460,7 @@ class TaskButton(QPushButton):
     # --- [Antigravity Ende] ---
 
     def enterEvent(self, event) -> None:
+        self.dock.start_magnify()
         if not self._dragging:
             self.dock.ctx.task_preview.hover(self)
         super().enterEvent(event)
@@ -566,6 +636,7 @@ class Dock(BarWindow):
         self._tools_moved: list[str] = []
         self.task_indicator = "bar"
         self.task_counts = False
+        self.task_badges = True
         self.task_labels = False
 
         self._order: list[str] = list(ctx.config.get("taskbar.order").get(self.screen_id, []))
@@ -576,6 +647,14 @@ class Dock(BarWindow):
         self._order_held = False  # eine andere Taskbar zieht gerade
         self._glides: dict[TaskButton, QPropertyAnimation] = {}
         self.marks = TaskMarks(self, self.root)
+        self._magnify_timer = QTimer(self, interval=MAGNIFY_MS)  # läuft nur, solange die Maus auf den Icons ist
+        self._magnify_timer.timeout.connect(self._magnify)
+        self._approach_timer = QTimer(self, interval=APPROACH_MS)  # nur bei eingeschalteter Vergrößerung
+        self._approach_timer.timeout.connect(self._check_approach)
+        self._fixed_order: list[str] = []
+        self._fixed_press: tuple[str, QPoint] | None = None
+        self._fixed_drag = ""
+        self._fixed_glides: dict[QWidget, QPropertyAnimation] = {}
         self.timer = QTimer(self, interval=700)
         self.timer.timeout.connect(self.refresh)
         self.timer.start()
@@ -610,6 +689,7 @@ class Dock(BarWindow):
         if is_dev():  # [Antigravity: Claude-Knopf umschaltbar wie andere Hauptbuttons]
             toggle("Claude-Knopf", "dev_claude_button")
         toggle("App-Namen", "task_labels")
+        toggle("Schwebendes Dock", "dock_floating")
         menu.addSeparator()
         for label, value in (("Ganze Bildschirmbreite", "full"), ("Nur so breit wie die Icons", "fit")):
             action = menu.addAction(label)
@@ -734,6 +814,8 @@ class Dock(BarWindow):
     def corner_radius(self) -> int:
         """Windows rundet Fenster höchstens um 8 px. Die Kachel-Stile wollen rundere Ecken (Meta „corner“),
         „Komplett rund“ macht die Leiste zur Pille. Alle anderen Stile behalten die Ecken von Windows."""
+        if self.floating():
+            return min(self.height(), self.width()) // 2
         radius = int(self.meta().get("corner") or 0)
         if radius and self.ctx.theme.tile_shape == "round":
             radius = self.height()
@@ -741,7 +823,7 @@ class Dock(BarWindow):
 
     def paints_backdrop(self) -> bool:
         """Stile mit runderen Ecken als 8 px bekommen ihren Hintergrund von PopWin statt vom Windows-Blur."""
-        return int(self.meta().get("corner") or 0) > 8
+        return self.floating() or int(self.meta().get("corner") or 0) > 8
 
     def backdrop_color(self) -> QColor:
         """Die Tönung des Stils, deckender als beim Blur, damit die Leiste ohne Weichzeichner lesbar bleibt."""
@@ -770,7 +852,12 @@ class Dock(BarWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self.backdrop_color())
-        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+        if self.floating():  # feiner heller Rand wie bei einer Glas-Pille
+            light = self.ctx.theme.mode == "light"
+            painter.setPen(QColor(0, 0, 0, 40) if light else QColor(255, 255, 255, 34))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        else:
+            painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
         painter.end()
 
     def resizeEvent(self, event) -> None:
@@ -805,10 +892,11 @@ class Dock(BarWindow):
         self.search.style().polish(self.search)
 
     def _on_config(self, key: str) -> None:
-        if key == "profile" or key.startswith("taskbar"):
+        if key == "profile" or key.startswith("taskbar") or key in ("nova.enabled", "performance.level"):
             # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
             self._sync_orientation()
             # --- [Antigravity Ende: Sidebar Support] ---
+            self._arrange_fixed()
             self._arrange_tools()  # zuerst: Umhängen in ein anderes Fenster blendet ein Widget aus
             self.media.allowed = self.option("show_media") and self.edge not in ("left", "right")  # [Antigravity: Sidebar schmal halten]
             self.media.set_style(self.option("media_style"), self.option("media_width"))
@@ -816,7 +904,7 @@ class Dock(BarWindow):
             if self.claude is not None:  # [Antigravity: Claude-Knopf sofort aktualisieren]
                 self.claude.setVisible(self.claude_on_button())
             self.trash.setVisible(self.option("show_recycle"))
-            self.nova.setVisible(self.option("show_nova_button"))
+            self.nova.setVisible(self.option("show_nova_button") and self.ctx.nova_enabled())
             self.desktop.setVisible(self.option("show_desktop"))
             self.start.setVisible(self.option("show_start"))
             self.search.setVisible(self.option("show_search") and self.edge not in ("left", "right"))  # [Antigravity: Sidebar]
@@ -825,17 +913,36 @@ class Dock(BarWindow):
             self._place_clock()
             self.task_indicator = self.option("task_indicator")
             self.task_counts = self.option("task_counts")
+            self.task_badges = self.option("task_badges")
+            # Sparsam: seltener nach neuen Fenstern sehen
+            self.timer.setInterval(1500 if self.ctx.config.get("performance.level") == "saver" else 700)
+            if self.magnifies():
+                self._approach_timer.start()
+            else:
+                self._approach_timer.stop()
             self.task_labels = self.option("task_labels")
             self.apps.setSpacing(self.option("icon_spacing"))
             set_prop(self.root, "popFit", self._fits_content())
+            self._style_floating()
             self._apply_native_backdrop()
+            self._round_corners()
             self.refresh(force=True)
             self.reposition()
             if self._registered:
                 self._sync_auto_hide()
 
     def _fits_content(self) -> bool:
-        return self.option("dock_style") == "fit"
+        return self.option("dock_style") == "fit" or self.floating()
+
+    def floating(self) -> bool:
+        """Schwebendes Dock: runde Pille mit Abstand zum Bildschirmrand, nur so breit wie die Icons."""
+        return bool(self.option("dock_floating"))
+
+    def _style_floating(self) -> None:
+        """Der Stil malt sonst ein eckiges Rechteck über die runde Pille, die PopWin selbst zeichnet."""
+        sheet = "#Bar { background: transparent; border: none; }" if self.floating() else ""
+        if self.root.styleSheet() != sheet:
+            self.root.setStyleSheet(sheet)
 
     def _place_clock(self) -> None:
         """Ganz links, ganz rechts oder als kleine Pille über der Mitte; sonst steht die Uhr in der Topbar."""
@@ -922,12 +1029,14 @@ class Dock(BarWindow):
         mine = menu.anchor is self.start or (menu.anchor is None and self.ctx.monitors.is_primary(self.bar_screen))
         on_tools = self.tools is not None and self.tools.isVisible() and self.tools.frameGeometry().contains(QCursor.pos())
         return (on_tools or self._dragged is not None or self._dropping is not None or QApplication.activePopupWidget() is not None
-                or self.ctx.task_preview.isVisible() or (menu.isVisible() and mine))
+                or self.ctx.task_preview.isVisible() or (menu.isVisible() and not menu.animator.closing and mine))
 
     def bar_size(self) -> int:
         return self.option("dock_height") or super().bar_size()
 
     def bar_margin(self) -> int:
+        if self.floating():
+            return max(0, int(self.option("dock_gap")))
         # Die kompakte Leiste schwebt, sie braucht auch ohne Theme-Abstand etwas Luft zum Rand.
         return max(super().bar_margin(), 6) if self._fits_content() else super().bar_margin()
 
@@ -1227,7 +1336,175 @@ class Dock(BarWindow):
         monitor = native_rect(self.bar_screen)
         return [w for w in windows if win_api.window_monitor(w.hwnd) == monitor]
 
+    # --- Icons wachsen unter der Maus (Beta) ---------------------------------------
+    def magnifies(self) -> bool:
+        return bool(self.ctx.config.get("taskbar.magnify")) and self.ctx.config.get("performance.level") != "saver"
+
+    def start_magnify(self) -> None:
+        if self.magnifies() and not self._magnify_timer.isActive():
+            self._magnify_timer.start()
+
+    def _nearness(self, cursor: QPoint) -> float:
+        frame = self.frameGeometry()
+        side = MAGNIFY_REACH * self._icon_size()
+        return nearness(cursor.x(), cursor.y(), frame.left(), frame.top(), frame.right(), frame.bottom(), self.edge,
+                        APPROACH_ZONE * self.bar_size(), side)
+
+    def _check_approach(self) -> None:
+        """Die Maus kommt von oben (oder von der Seite) näher: schon dann sanft wachsen, nicht erst auf dem Icon."""
+        if not self.isVisible() or self.behind_game() or self._magnify_timer.isActive():
+            return
+        if self._nearness(QCursor.pos()) > 0:
+            self.start_magnify()
+
+    def _magnify(self) -> None:
+        base = self._icon_size()
+        top = max(base, min(round(base * MAGNIFY_TOP), self.bar_size() - 8))
+        cursor = QCursor.pos()
+        near = self._nearness(cursor) if self.magnifies() and self._dragged is None and not self._fixed_drag else 0.0
+        inside = near > 0
+        vertical = self.edge in ("left", "right")
+        changed = False
+        for button in self._buttons.values():
+            size = base
+            if inside:
+                center = button.mapToGlobal(button.rect().center())
+                distance = abs((cursor.y() - center.y()) if vertical else (cursor.x() - center.x()))
+                reach = MAGNIFY_REACH * (button.height() if vertical else button.width())
+                grow = (magnify_scale(distance, reach) - 1.0) / (MAGNIFY_TOP - 1.0)
+                size = round(base + (top - base) * grow * near)
+            if button.iconSize().width() != size:
+                button.setIconSize(QSize(size, size))
+                changed = True
+        if changed:
+            self.marks.update()
+            self._fit_width()
+        elif not inside:
+            self._magnify_timer.stop()  # alles wieder normal groß: keine Arbeit mehr
+
+    # --- Feste Knöpfe umstellen (Start, Suche, Player, Nova, Papierkorb, Desktop) ---------------------------
+    def _fixed_widgets(self) -> dict[str, QWidget]:
+        return {"start": self.start, "search": self.search, "media": self.media, "nova": self.nova,
+                "trash": self.trash, "desktop": self.desktop}
+
+    def _arrange_fixed(self, order: list[str] | None = None, animate: bool = False) -> None:
+        """Stellt die festen Knöpfe in die gewünschte Reihenfolge; vor "apps" heißt links neben den App-Icons."""
+        order = dock_order_of(order if order is not None else self.option("dock_order"))
+        if order == self._fixed_order:
+            return
+        widgets = self._fixed_widgets()
+        before = {widget: widget.mapTo(self.root, QPoint(0, 0)) for widget in widgets.values() if widget.isVisible()}
+        row = self.root.layout()
+        for widget in widgets.values():
+            row.removeWidget(widget)
+        row.removeItem(self.apps)
+        split = order.index("apps")
+        index = row.indexOf(self.lead) + 1
+        for key in order[:split]:
+            row.insertWidget(index, widgets[key])
+            index += 1
+        row.insertLayout(index, self.apps)
+        index = row.indexOf(self.trail) + 1
+        for key in order[split + 1:]:
+            row.insertWidget(index, widgets[key])
+            index += 1
+        self._fixed_order = order
+        for widget in widgets.values():
+            if widget.property("fixedDrag") is None:
+                widget.setProperty("fixedDrag", True)
+                widget.installEventFilter(self)
+        if animate and duration_of(self.ctx.config):
+            row.activate()
+            for widget, old in before.items():
+                if self._fixed_drag and widgets.get(self._fixed_drag) is widget:
+                    continue  # das gezogene Icon hängt an der Maus
+                self._fixed_glide(widget, old)
+
+    def _fixed_glide(self, widget: QWidget, start: QPoint) -> None:
+        end = widget.pos()
+        if start == end:
+            return
+        animation = self._fixed_glides.get(widget)
+        if animation is None:
+            animation = self._fixed_glides[widget] = QPropertyAnimation(widget, b"pos", self)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            animation.setDuration(FIXED_GLIDE_MS)
+        animation.stop()
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.start()
+
+    def eventFilter(self, watched, event) -> bool:
+        kind = event.type()
+        widgets = self._fixed_widgets()
+        key = next((name for name, widget in widgets.items() if widget is watched), "")
+        if not key:
+            return super().eventFilter(watched, event)
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._fixed_press = (key, event.globalPosition().toPoint())
+        elif kind == QEvent.Type.MouseMove and self._fixed_press and self._fixed_press[0] == key:
+            point = event.globalPosition().toPoint()
+            if not self._fixed_drag and (point - self._fixed_press[1]).manhattanLength() >= QApplication.startDragDistance():
+                self._fixed_drag = key
+                self._fixed_grab = point - watched.mapToGlobal(QPoint(0, 0))
+                watched.raise_()
+                if isinstance(watched, QAbstractButton):
+                    watched.setDown(False)
+            if self._fixed_drag:
+                self._drag_fixed(watched, point)
+                return True
+        elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            dragged = self._fixed_drag
+            self._fixed_press = None
+            if dragged:
+                self._finish_fixed(watched)
+                return True  # kein Klick nach dem Ziehen
+        return super().eventFilter(watched, event)
+
+    def _drag_fixed(self, widget: QWidget, point: QPoint) -> None:
+        vertical = self.edge in ("left", "right")
+        local = widget.parentWidget().mapFromGlobal(point - self._fixed_grab)
+        widget.move(widget.x() if vertical else local.x(), local.y() if vertical else widget.y())
+        # Wohin gehört es? Nach den Mitten der anderen sichtbaren Teile, die App-Icons zählen als ein Block.
+        centers = []
+        widgets = self._fixed_widgets()
+        for key in self._fixed_order:
+            if key == self._fixed_drag:
+                continue
+            if key == "apps":
+                box = self.apps.geometry()
+                if box.isEmpty():
+                    box = self.trail.geometry()
+                center = box.center()
+                centers.append((key, self.root.mapToGlobal(center)))
+            elif widgets[key].isVisible():
+                centers.append((key, widgets[key].mapToGlobal(widgets[key].rect().center())))
+        mine = widget.mapToGlobal(widget.rect().center())
+        place = sum((mine.y() > c.y()) if vertical else (mine.x() > c.x()) for _key, c in centers)
+        visible = [key for key, _c in centers]
+        anchor_after = visible[place - 1] if place > 0 else None
+        order = [key for key in self._fixed_order if key != self._fixed_drag]
+        order.insert(order.index(anchor_after) + 1 if anchor_after else 0, self._fixed_drag)
+        if order != self._fixed_order:
+            held = widget.pos()
+            self._arrange_fixed(order, animate=True)
+            widget.move(held)  # bleibt unter der Maus, die anderen machen Platz
+
+    def _finish_fixed(self, widget: QWidget) -> None:
+        start = widget.pos()
+        self._fixed_drag = ""
+        self.root.layout().activate()
+        self._fixed_glide(widget, start)
+        if self._fixed_order != dock_order_of(self.option("dock_order")):
+            self.ctx.config.set_monitor(self.screen_id, "dock_order", list(self._fixed_order))
+
+    def peek(self) -> None:
+        super().peek()
+        self.refresh()  # hinter dem Spiel lief kein Abgleich, die Icons sollen beim Hereinkommen stimmen
+
     def refresh(self, force: bool = False) -> None:
+        if not force and self.behind_game() and self._dragged is None:
+            return  # im Spiel nicht alle 0,7 s Fenster abfragen, solange die Taskbar unsichtbar ist
         # Beim Ziehen darf nichts neu gebaut werden: Der Knopf in der Hand würde gelöscht und das Icon fiele heraus.
         held = self._left_held()
         if not held:
@@ -1274,6 +1551,8 @@ class Dock(BarWindow):
         groups = {key: groups[key] for key in ordered_keys(list(groups), self._order)}
 
         foreground = win_api.foreground_window()
+        notices = visible_notices(self.ctx.notifications.notices, self.ctx.config.get("notifications.hidden"))             if self.task_badges else []
+        labels = notice_labels(notices, self.ctx.apps.apps) if notices else {}
         signature = (tuple(groups), self._icon_size())
         if force or signature != self._signature:
             only_order = not force and self._signature is not None and signature[1] == self._signature[1] \
@@ -1292,6 +1571,8 @@ class Dock(BarWindow):
             # Bei mehreren Fenstern einer App reicht ein nicht minimiertes.
             set_prop(button, "shown", any(not win_api.is_minimized(w.hwnd) for w in group["windows"]))
             set_prop(button, "focused", any(w.hwnd == foreground for w in group["windows"]))
+            button.badge = badge_text(badge_count(notices, key, button.target, button.name or button.display_name(),
+                                                  labels)) if notices else ""
             button.update()
         self.marks.raise_()
         self.marks.update()
@@ -1310,6 +1591,7 @@ class Dock(BarWindow):
         for animation in list(self._glides.values()):
             animation.stop()
         self._glides.clear()
+        before = set(self._buttons)
         for button in self._buttons.values():
             self.apps.removeWidget(button)
             button.hide()
@@ -1323,6 +1605,27 @@ class Dock(BarWindow):
             self._buttons[key] = button
             self.apps.addWidget(button)
             button.show()  # sonst fehlt das Icon noch in der Breitenberechnung und die Leiste zuckt
+            if before and key not in before:
+                self._pop_in(button, size)
+
+    def _pop_in(self, button: "TaskButton", size: int) -> None:
+        """Eine neu geöffnete App ploppt in die Taskbar wie bei Windows: Das Icon wächst federnd auf seine Größe,
+        die Nachbarn rücken dabei weich zur Seite."""
+        length = duration_of(self.ctx.config)
+        if not length:
+            return
+        animation = QVariantAnimation(button, duration=max(160, length + 60), startValue=0.25, endValue=1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutBack)
+
+        def grow(value) -> None:
+            edge = max(4, round(size * float(value)))
+            button.setIconSize(QSize(edge, edge))
+            self.marks.update()
+
+        animation.valueChanged.connect(grow)
+        animation.finished.connect(lambda: (button.setIconSize(QSize(size, size)), self._fit_width()))
+        grow(0.25)
+        animation.start(QVariantAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _icon(self, group: dict) -> QIcon:
         """Wie die Windows-Taskleiste: angeheftet das Icon der Verknüpfung, sonst das der App-Kennung des Fensters,

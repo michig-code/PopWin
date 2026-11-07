@@ -1031,11 +1031,45 @@ def redraw_wallpaper() -> None:
     user32.SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, None, 3)
 
 
-def foreground_is_fullscreen() -> bool:
-    hwnd = user32.GetForegroundWindow()
+def is_fullscreen_window(hwnd: int) -> bool:
+    """Füllt dieses Fenster seinen Monitor genau aus (Spiel, Video, F11)? Der Desktop zählt nicht."""
     if not hwnd or is_desktop_window(hwnd):
         return False
     return window_rect(hwnd) == window_monitor(hwnd)
+
+
+def foreground_is_fullscreen() -> bool:
+    return is_fullscreen_window(user32.GetForegroundWindow() or 0)
+
+
+def fullscreen_window_on(hwnd: int, monitor: tuple[int, int, int, int]) -> bool:
+    """Ist genau dieses Fenster das Vollbild auf `monitor`?"""
+    return _counts_for_fullscreen(hwnd) and _fills(hwnd, monitor)
+
+
+# --- Fokuswechsel sofort erfahren statt alle 700 ms nachzusehen --------------
+# Ein WinEvent-Hook ist kein Eingabe-Hook: Windows meldet nur den Wechsel, Maus und Tastatur laufen nie durch PopWin.
+WINEVENTPROC = ctypes.WINFUNCTYPE(None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND, wintypes.LONG, wintypes.LONG,
+                                  wintypes.DWORD, wintypes.DWORD)
+EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS = 0x0003, 0x0000, 0x0002
+user32.SetWinEventHook.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE, WINEVENTPROC, wintypes.DWORD,
+                                   wintypes.DWORD, wintypes.DWORD)
+user32.SetWinEventHook.restype = wintypes.HANDLE
+_event_procs: list = []  # ctypes gibt den Rückruf sonst frei, und Windows ruft ins Leere
+
+
+def watch_foreground(callback) -> int:
+    """Ruft `callback(hwnd)` im Hauptthread, sobald ein anderes Programm in den Vordergrund kommt."""
+    def on_event(_hook, _event, hwnd, _object, _child, _thread, _time):
+        try:
+            callback(int(hwnd or 0))
+        except Exception:  # ein Fehler hier darf nie bis in Windows durchschlagen
+            log.exception("Vordergrund-Wechsel")
+
+    proc = WINEVENTPROC(on_event)
+    _event_procs.append(proc)
+    return int(user32.SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, proc, 0, 0,
+                                      WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS) or 0)
 
 
 @functools.lru_cache(maxsize=256)  # die Taskbar fragt das bei jeder Aktualisierung, das Manifest ändert sich nie
@@ -1639,3 +1673,66 @@ def _mic_users(path: str) -> list[str]:
 def microphone_users() -> list[str]:
     """Windows vermerkt pro App, wann das Mikrofon zuletzt losgelassen wurde; 0 = läuft gerade."""
     return _mic_users(_MIC)
+
+
+# --- Tastatur-Sprache in der Topbar (DEU, ENU …) ---
+WM_INPUTLANGCHANGEREQUEST = 0x0050
+HKL_NEXT = 1
+LOCALE_SABBREVLANGNAME = 0x0003
+user32.GetKeyboardLayout.argtypes = (wintypes.DWORD,)
+user32.GetKeyboardLayout.restype = ctypes.c_void_p
+kernel32.GetLocaleInfoW.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.LPWSTR, ctypes.c_int)
+kernel32.GetLocaleInfoW.restype = ctypes.c_int
+
+
+def language_id(hkl: int | None) -> int:
+    """Das untere Wort eines Tastatur-Layouts ist die Sprache, z. B. 0x0407 für Deutsch."""
+    return int(hkl or 0) & 0xFFFF
+
+
+def language_short(lang_id: int) -> str:
+    """Kurzname der Sprache wie in der Windows-Taskbar, z. B. „DEU“."""
+    if not lang_id:
+        return ""
+    buffer = ctypes.create_unicode_buffer(16)
+    if kernel32.GetLocaleInfoW(lang_id, LOCALE_SABBREVLANGNAME, buffer, 16):
+        return buffer.value.upper()[:3]
+    return ""
+
+
+def foreign_foreground() -> int:
+    """Vordergrund-Fenster, solange es nicht zu PopWin gehört; sonst 0."""
+    hwnd = user32.GetForegroundWindow()
+    return int(hwnd) if hwnd and _pid(hwnd) != os.getpid() else 0
+
+
+def keyboard_language(hwnd: int) -> int:
+    """Sprache der Tastatur im Fenster ``hwnd`` (jeder Thread hat sein eigenes Layout)."""
+    thread = user32.GetWindowThreadProcessId(hwnd, None) if hwnd else 0
+    return language_id(user32.GetKeyboardLayout(thread))
+
+
+def next_keyboard_language(hwnd: int) -> bool:
+    """Bittet das Fenster, zur nächsten installierten Tastatur-Sprache zu wechseln."""
+    return bool(hwnd) and bool(user32.PostMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, HKL_NEXT))
+
+
+def open_projection() -> None:
+    """Öffnet „Bildschirm projizieren“ wie Win+P."""
+    if not shell_open("ms-settings-displays-topology:projection"):
+        shell_open("DisplaySwitch.exe")
+
+
+def open_snipping() -> None:
+    """Startet das Ausschneide-Tool für einen Screenshot."""
+    if not shell_open("ms-screenclip:"):
+        shell_open("SnippingTool.exe")
+
+
+user32.GetKeyboardLayoutList.argtypes = (ctypes.c_int, ctypes.c_void_p)
+user32.GetKeyboardLayoutList.restype = ctypes.c_int
+
+
+def keyboard_language_count() -> int:
+    """Wie viele Tastatur-Layouts installiert sind; mit nur einem gibt es nichts umzuschalten."""
+    return int(user32.GetKeyboardLayoutList(0, None))

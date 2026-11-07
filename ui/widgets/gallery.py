@@ -164,7 +164,7 @@ class WidgetGallery(NativeWindow):
         button = QPushButton(objectName="Secondary")
 
         def show(color: str) -> None:
-            button.setText(color or "Farbe des UI-Stils")
+            button.setText(color or "Farbe des Themes")
 
         def pick() -> None:
             chosen = QColorDialog.getColor(window.accent(), self, option.label)
