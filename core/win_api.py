@@ -743,10 +743,33 @@ def foreground_on(monitor: tuple[int, int, int, int]) -> bool:
     return bool(hwnd) and contains_center(window_rect(hwnd), monitor)
 
 
+FULLSCREEN_SLACK = 4  # so viele Pixel darf ein Vollbild-Fenster am Rand fehlen (Geometry Dash ist 2 px zu schmal)
+
+
 def is_fullscreen_rect(window: tuple[int, int, int, int], monitor: tuple[int, int, int, int], zoomed: bool) -> bool:
     """Maximierte Fenster ragen ein paar Pixel über den Rand, echtes Vollbild passt genau.
-    Discord und andere Electron-Apps melden auch im Vollbild "maximiert", daher zählt die genaue Größe."""
-    return covers_monitor(window, monitor) and (not zoomed or window == monitor)
+    Discord und andere Electron-Apps melden auch im Vollbild "maximiert", daher zählt die genaue Größe.
+    Randlose Spiele sind manchmal ein, zwei Pixel kleiner als der Bildschirm (Geometry Dash: 3438 statt 3440);
+    das zählt trotzdem als Vollbild, sonst nahm sich PopWin über dem Spiel Platz und schob es nach unten."""
+    s = FULLSCREEN_SLACK
+    inner = (monitor[0] + s, monitor[1] + s, monitor[2] - s, monitor[3] - s)
+    if zoomed:
+        return covers_monitor(window, monitor) and window == monitor
+    if covers_monitor(window, inner):
+        return True
+    # Schon verschoben: genau so groß wie der Bildschirm, nur ein Stück nach unten oder zur Seite gerückt, weil PopWin
+    # vorher Platz am Rand genommen hatte. Zählt als Vollbild, damit PopWin den Platz freigibt und das Spiel zurückkann.
+    width, height = window[2] - window[0], window[3] - window[1]
+    same_size = abs(width - (monitor[2] - monitor[0])) <= s and abs(height - (monitor[3] - monitor[1])) <= s
+    shift = max(abs(window[0] - monitor[0]), abs(window[1] - monitor[1]))
+    return same_size and shift <= (monitor[3] - monitor[1]) // 8
+
+
+def is_overlay(hwnd: int) -> bool:
+    """Durchsichtige Overlays, durch die die Maus hindurchgeht (Medal, Discord, Steam, NVIDIA). Sie liegen über dem
+    Spiel, sind aber selbst kein Vollbild; früher verdeckten sie für PopWin das Spiel darunter."""
+    ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+    return bool(ex & WS_EX_LAYERED_STYLE) and bool(ex & WS_EX_TRANSPARENT_STYLE)
 
 
 def overlaps(window: tuple[int, int, int, int], monitor: tuple[int, int, int, int]) -> bool:
@@ -762,26 +785,56 @@ def _fills(hwnd: int, monitor: tuple[int, int, int, int]) -> bool:
     return is_fullscreen_rect(window_rect(hwnd), monitor, bool(user32.IsZoomed(hwnd)))
 
 
-def fullscreen_on(monitor: tuple[int, int, int, int]) -> bool:
-    """Liegt auf diesem Monitor ein Vollbild-Fenster (Spiel, Video, F11 im Browser) ganz oben?
+WS_EX_LAYERED_STYLE, WS_EX_TRANSPARENT_STYLE = 0x80000, 0x20
+_last_game: dict[tuple[int, int, int, int], int] = {}  # Monitor -> zuletzt gesehenes Vollbild-Fenster
+
+
+def fullscreen_window(monitor: tuple[int, int, int, int]) -> int:
+    """Das Vollbild-Fenster (Spiel, Video, F11 im Browser), das auf diesem Monitor ganz oben liegt, sonst 0.
 
     Nicht nur das aktive Fenster zählt: Mit Discord im Vollbild auf Monitor 2 kann man auf Monitor 1 arbeiten.
     """
     hwnd = user32.GetForegroundWindow()
     if _counts_for_fullscreen(hwnd) and _fills(hwnd, monitor):
-        return True
-    found = [False]
+        return hwnd
+    found = [0]
 
     def callback(candidate, _lparam):  # EnumWindows liefert von oben nach unten
-        if not _counts_for_fullscreen(candidate) or not _is_task_window(candidate):
+        if not _counts_for_fullscreen(candidate) or not _is_task_window(candidate) or is_overlay(candidate):
             return True
-        if not overlaps(window_rect(candidate), monitor):
+        # Nach der Mitte: Maximierte Fenster ragen 8 px auf den Nachbarmonitor und verdeckten dort sonst das Spiel
+        if not contains_center(window_rect(candidate), monitor):
             return True
-        found[0] = _fills(candidate, monitor)
+        found[0] = candidate if _fills(candidate, monitor) else 0
         return False
 
     user32.EnumWindows(WNDENUMPROC(callback), 0)
     return found[0]
+
+
+def game_waits(hwnd: int) -> bool:
+    """Ein Spiel hat sich nur kurz verkleinert, weil ein PopWin-Fenster (Nova, ein Menü) den Fokus bekam.
+
+    Spiele wie Geometry Dash legen sich im Vollbild sofort ab, sobald sie den Fokus verlieren. Für PopWin sah das wie
+    „kein Vollbild mehr“ aus: Die Leisten kamen hervor, nahmen sich wieder Platz am Rand, und beim Zurückkehren schob
+    Windows das Spiel unter die Topbar. Solange der Fokus bei PopWin selbst liegt, gilt das Spiel darum weiter als Vollbild.
+    """
+    if not hwnd or not is_window(hwnd) or not is_minimized(hwnd):
+        return False
+    front = foreground_window()
+    return not front or _pid(front) == os.getpid()
+
+
+def fullscreen_on(monitor: tuple[int, int, int, int]) -> bool:
+    """Liegt auf diesem Monitor ein Vollbild-Fenster ganz oben, oder wartet dort ein Spiel hinter einem PopWin-Fenster?"""
+    game = fullscreen_window(monitor)
+    if game:
+        _last_game[monitor] = game
+        return True
+    if game_waits(_last_game.get(monitor, 0)):
+        return True
+    _last_game.pop(monitor, None)
+    return False
 
 
 def is_topmost(hwnd: int) -> bool:

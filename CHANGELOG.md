@@ -1,5 +1,11 @@
 ﻿# Änderungen
 
+## 4.0.1
+
+- Spiele wie Geometry Dash werden jetzt auch mit eingeblendeten Overlay-Programmen zuverlässig als Vollbild erkannt, sodass sie nicht mehr versehentlich verkleinert werden.
+- Taskleiste und obere Leiste drängen sich beim Öffnen von Nova nicht mehr ins Bild und verschieben das Spiel nicht mehr nach unten.
+- Bereits durch die Leisten verschobene Spiele erhalten ihren Platz auf dem Bildschirm automatisch zurück.
+
 ## 4.0.0
 
 - Mit der Windows-Taste holen Sie Taskbar, Topbar und Home-Menü jetzt superschnell, flüssig und ohne lästiges Aufblitzen in den Vollbildmodus.

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-VERSION = "4.0.0"  # bei jeder neuen Ausgabe erhöhen, daran erkennt das Setup ein Update
+VERSION = "4.0.1"  # bei jeder neuen Ausgabe erhöhen, daran erkennt das Setup ein Update
 APP_NAME = "PopWin"
 EXE_NAME = "PopWin.exe"
 UNINSTALLER = "Deinstallieren.exe"

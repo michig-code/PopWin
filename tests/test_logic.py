@@ -5053,7 +5053,7 @@ class DockStack(unittest.TestCase):
 
 
 class Updates(unittest.TestCase):
-    RELEASE = {"tag_name": "v3.10", "body": "- Neu", "html_url": "https://github.com/x/popwin/releases/tag/v3.10",
+    RELEASE = {"tag_name": "v90.10", "body": "- Neu", "html_url": "https://github.com/x/popwin/releases/tag/v90.10",
                "assets": [{"name": "PopWin.Setup.exe", "browser_download_url": "https://x/s.exe", "size": 3, "digest": "sha256:" + "ab" * 32},
                           {"name": "PopWin Portable.zip", "browser_download_url": "https://x/p.zip", "size": 5}]}
 
@@ -5065,7 +5065,7 @@ class Updates(unittest.TestCase):
 
     def test_release_is_read(self):
         release = updater.read_release(self.RELEASE)
-        self.assertEqual(release["version"], "3.10")
+        self.assertEqual(release["version"], "90.10")
         self.assertEqual(release["setup"]["url"], "https://x/s.exe")  # GitHub macht aus Leerzeichen Punkte
         self.assertEqual(release["setup"]["sha256"], "ab" * 32)
         self.assertEqual(release["portable"]["sha256"], "")
@@ -5083,7 +5083,7 @@ class Updates(unittest.TestCase):
 
     def test_skipped_version_stays_quiet_unless_asked(self):
         ctx = ResetContext()
-        ctx.config.set("updates.skipped", "3.10", notify=False)
+        ctx.config.set("updates.skipped", "90.10", notify=False)
         checker = updater.UpdateChecker(ctx.config)
         found = []
         checker.found.connect(found.append)
@@ -5178,7 +5178,7 @@ class Updates(unittest.TestCase):
         self.assertEqual(dialog.install.text(), "Download-Seite öffnen")  # aus dem Quellordner wird nichts installiert
         self.assertIn("Neu", dialog.notes.toPlainText())
         dialog._skip()
-        self.assertEqual(ctx.config.get("updates.skipped"), "3.10")
+        self.assertEqual(ctx.config.get("updates.skipped"), "90.10")
         dialog.hide()
 
 
@@ -7420,6 +7420,64 @@ class TopbarAndAudioExtras(unittest.TestCase):
         window = SettingsWindow(self.ctx)
         self.assertTrue(hasattr(window, "theme_pick"))
         window.close()
+
+
+
+class GameMinimizesBehindNova(unittest.TestCase):
+    """Geometry Dash legt sich im Vollbild ab, sobald Nova den Fokus nimmt. Das darf kein „Vollbild vorbei“ sein."""
+    MONITOR = (0, 0, 1920, 1080)
+    GAME, OTHER, NOVA = 501, 502, 503
+
+    def setUp(self):
+        win_api._last_game.clear()
+        self.addCleanup(win_api._last_game.clear)
+
+    def _state(self, fullscreen, minimized, front):
+        pids = {self.GAME: 1, self.OTHER: 2, self.NOVA: os.getpid()}
+        return (unittest.mock.patch.object(win_api, "fullscreen_window", return_value=fullscreen),
+                unittest.mock.patch.object(win_api, "is_window", return_value=True),
+                unittest.mock.patch.object(win_api, "is_minimized", side_effect=lambda h: h == self.GAME and minimized),
+                unittest.mock.patch.object(win_api, "foreground_window", return_value=front),
+                unittest.mock.patch.object(win_api, "_pid", side_effect=lambda h: pids.get(h, 0)))
+
+    def _fullscreen(self, fullscreen, minimized, front):
+        patches = self._state(fullscreen, minimized, front)
+        for patch in patches:
+            patch.start()
+        try:
+            return win_api.fullscreen_on(self.MONITOR)
+        finally:
+            for patch in patches:
+                patch.stop()
+
+    def test_game_behind_nova_still_counts_as_fullscreen(self):
+        self.assertTrue(self._fullscreen(self.GAME, False, self.GAME))  # spielt
+        self.assertTrue(self._fullscreen(0, True, self.NOVA))  # Nova offen, Spiel hat sich abgelegt: kein Platz nehmen
+        self.assertTrue(self._fullscreen(self.GAME, False, self.GAME))  # zurück im Spiel
+
+    def test_another_program_ends_the_game_memory(self):
+        self.assertTrue(self._fullscreen(self.GAME, False, self.GAME))
+        self.assertFalse(self._fullscreen(0, True, self.OTHER))  # bewusst zu einem anderen Programm gewechselt
+        self.assertFalse(self._fullscreen(0, True, self.NOVA))  # danach zählt das abgelegte Spiel nicht mehr
+
+    def test_borderless_game_two_pixels_short_is_fullscreen(self):
+        monitor = (0, 0, 3440, 1440)
+        self.assertTrue(win_api.is_fullscreen_rect((0, 0, 3438, 1440), monitor, False))  # Geometry Dash
+        self.assertTrue(win_api.is_fullscreen_rect((0, 48, 3438, 1488), monitor, False))  # schon verschoben: Platz freigeben
+        self.assertFalse(win_api.is_fullscreen_rect((0, 700, 3438, 2140), monitor, False))  # weit weg: kein Vollbild hier
+        self.assertFalse(win_api.is_fullscreen_rect((0, 0, 3000, 1440), monitor, False))  # nur ein großes Fenster
+        self.assertFalse(win_api.is_fullscreen_rect((-8, -8, 3448, 1448), monitor, True))  # normal maximiert
+
+    def test_click_through_overlays_do_not_hide_the_game(self):
+        styles = {1: 0x280028, 2: 0x80000, 3: 0x100}  # Medal-Overlay, nur durchsichtig, normales Fenster
+        with unittest.mock.patch.object(win_api.user32, "GetWindowLongPtrW", side_effect=lambda h, _i: styles[h]):
+            self.assertTrue(win_api.is_overlay(1))
+            self.assertFalse(win_api.is_overlay(2))
+            self.assertFalse(win_api.is_overlay(3))
+
+    def test_closed_or_restored_game_is_forgotten(self):
+        self.assertTrue(self._fullscreen(self.GAME, False, self.GAME))
+        self.assertFalse(self._fullscreen(0, False, self.NOVA))  # Spiel ist nicht abgelegt, nur nicht mehr Vollbild
 
 
 if __name__ == "__main__":
