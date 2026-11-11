@@ -434,6 +434,11 @@ class SettingsWindow(NativeWindow):
         form = page.group("Animationen")
         form.addRow(self._check("animations.enabled", "Weiche Animationen beim Starten, Öffnen und Schließen"))
         form.addRow("Dauer", self._spin("animations.duration", 80, 600, " ms"))
+        form = page.group("Hell und Dunkel nach Uhrzeit")
+        form.addRow(self._check("auto_mode.enabled", "Tagsüber hell, abends dunkel"))
+        form.addRow("Hell ab", self._line("auto_mode.light_from"))
+        form.addRow("Dunkel ab", self._line("auto_mode.dark_from"))
+        page.note("Uhrzeiten wie 07:00 und 19:00. Stellst du zwischendurch von Hand um, bleibt das bis zum nächsten Wechsel.")
         return page
 
     def _themes_page(self) -> Page:
@@ -909,6 +914,9 @@ class SettingsWindow(NativeWindow):
         form.addRow("Bildschirme", self._combo("wallpaper.screens", {"all": "Alle Bildschirme", "primary": "Nur dem Hauptmonitor"}))
         form.addRow(self._check("wallpaper.pause_covered", "Pausieren, wenn Fenster den Desktop verdecken"))
         form.addRow(self._check("wallpaper.pause_on_battery", "Im Akkubetrieb pausieren"))
+        form.addRow("Hintergrund wechseln", self._combo("wallpaper.rotate_minutes", {
+            0: "Nie", 5: "Alle 5 Minuten", 15: "Alle 15 Minuten", 30: "Alle 30 Minuten", 60: "Jede Stunde", 180: "Alle 3 Stunden"}))
+        form.addRow(self._check("wallpaper.rotate_shuffle", "In zufälliger Reihenfolge wechseln"))
         self.wall_list = QListWidget()
         self.wall_list.setFixedHeight(170)
         self.wall_list.itemClicked.connect(self._pick_wallpaper)
@@ -1627,9 +1635,39 @@ class SettingsWindow(NativeWindow):
         load.clicked.connect(self._import_settings)
         form.addRow(export)
         form.addRow(load)
+        form = page.group("Automatische Backups")
+        self.backup_list = QComboBox()
+        self._fill_backups()
+        restore = QPushButton("Backup zurückholen", objectName="Secondary")
+        restore.clicked.connect(self._restore_backup)
+        form.addRow("Stand vom", self.backup_list)
+        form.addRow(restore)
+        form.addRow(page.text("Bei jedem Start sichert PopWin die Einstellungen und behält die letzten fünf Stände. "
+                              "Ist die Einstellungsdatei einmal kaputt, nimmt PopWin von selbst den neuesten Stand."))
         page.note("Die Datei enthält nur das Aussehen und die Einstellungen von PopWin. Nicht dabei sind Schlüssel, "
                   "Nova-Verbindungen, Notizen und Widgets, dein Hintergrundbild und was nur zu deinen Bildschirmen passt.")
         return page
+
+    def _fill_backups(self) -> None:
+        self.backup_list.clear()
+        for file in config_manager.list_backups(self.ctx.config.path.parent / "backups"):
+            stamp = file.stem.removeprefix("settings-")  # JJJJMMTT-HHMMSS
+            label = f"{stamp[6:8]}.{stamp[4:6]}.{stamp[:4]}  {stamp[9:11]}:{stamp[11:13]}" if len(stamp) == 15 else stamp
+            self.backup_list.addItem(label, str(file))
+
+    def _restore_backup(self) -> None:
+        file = self.backup_list.currentData()
+        if not file:
+            QMessageBox.information(self, "PopWin", "Es gibt noch kein Backup. Das erste entsteht beim nächsten Start.")
+            return
+        if QMessageBox.question(self, "PopWin", "Diesen Stand zurückholen? Deine jetzigen Einstellungen werden dabei ersetzt.")                 != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            config_manager.restore_backup(self.ctx.config, Path(file))
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "PopWin", f"Konnte nicht übernommen werden: {exc}")
+            return
+        self.ctx.restart_ui()
 
     def _fill_presets(self) -> None:
         self.preset_list.clear()

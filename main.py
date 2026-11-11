@@ -37,6 +37,8 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from config.config_manager import ConfigManager  # noqa: E402
 from core import hardware, i18n, net_stats, paths, wallpapers, win_api, windows_pins  # noqa: E402
 from core.quick_answers import ClipHistory, FileIndex  # noqa: E402
+from core.schedule import mode_for, parse_clock  # noqa: E402
+from config import config_manager  # noqa: E402
 from core.version import VERSION  # noqa: E402
 from core.paths import LOG_DIR, app_command, app_shortcut  # noqa: E402
 from core.app_index import AppIndex  # noqa: E402
@@ -137,6 +139,10 @@ class PopWinApp(QObject):
         self._taskbar_guard.timeout.connect(self._keep_taskbar_hidden)
 
         self.wallpaper = wallpapers.WallpaperPlayer(self)
+        self._scheduled_mode = ""  # was die Uhr zuletzt verlangt hat; nur ein Wechsel davon schaltet um
+        self._mode_timer = QTimer(self, interval=60_000)
+        self._mode_timer.timeout.connect(self._follow_clock)
+        self.config.changed.connect(lambda key: key.startswith("auto_mode") and self._sync_mode_clock())
         self.trimmer = ProcessTrimmer(self.config, self)
         self.config.changed.connect(self._on_config)
         self.config.changed.connect(lambda key: key == "desktop_groups.style" and self.desktop_groups.sync())
@@ -154,6 +160,8 @@ class PopWinApp(QObject):
             win_api.move_autostart_link(*app_shortcut("main"))
         except Exception as exc:  # die Oberfläche darf daran nie scheitern
             log.warning("Startmenü-Eintrag nicht anlegbar: %s", exc)
+        config_manager.backup_settings(self.config.path)  # ein Stand pro Start, die letzten fünf bleiben
+        self._sync_mode_clock()
         self.status.start()
         self.media.start()
         self.apps.start()
@@ -408,6 +416,26 @@ class PopWinApp(QObject):
     def set_dark_mode(self, mode: str) -> None:
         win_api.set_system_mode(mode)
         self.theme.set_mode(mode)
+
+    def _sync_mode_clock(self) -> None:
+        if self.config.get("auto_mode.enabled"):
+            self._scheduled_mode = ""  # neue Zeiten gelten sofort
+            self._mode_timer.start()
+            self._follow_clock()
+        else:
+            self._mode_timer.stop()
+
+    def _follow_clock(self) -> None:
+        """Hell und Dunkel nach Uhrzeit. Geschaltet wird nur, wenn die Uhr die Seite wechselt: Wer zwischendurch
+        von Hand umstellt, behält das bis zum nächsten Wechsel."""
+        settings = self.config.get("auto_mode")
+        now = time.localtime()
+        mode = mode_for(now.tm_hour * 60 + now.tm_min, parse_clock(settings["light_from"], 7 * 60),
+                        parse_clock(settings["dark_from"], 19 * 60))
+        if mode != self._scheduled_mode:
+            self._scheduled_mode = mode
+            if mode != self.theme.mode:
+                self.set_dark_mode(mode)
 
     def _remember_clip(self) -> None:
         """Nur Text, nur im Arbeitsspeicher, und nur, wenn der Verlauf unter Datenschutz eingeschaltet ist."""

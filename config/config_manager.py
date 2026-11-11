@@ -49,8 +49,11 @@ DEFAULTS: dict[str, Any] = {
     "hide_missing_hardware": True,
     "network": {"hourly_test": False},
     # pause_covered: ruht, solange Fenster den Desktop verdecken; pause_on_battery: ruht ohne Netzteil
+    # rotate_minutes: alle so viele Minuten der nächste Hintergrund, 0 = immer derselbe
     "wallpaper": {"enabled": False, "file": "", "screens": "all", "source": "auto", "pause_covered": True,
-                  "pause_on_battery": True},
+                  "pause_on_battery": True, "rotate_minutes": 0, "rotate_shuffle": False},
+    # Hell und Dunkel nach Uhrzeit; ab Werk aus, dann gilt die Einstellung von Windows
+    "auto_mode": {"enabled": False, "light_from": "07:00", "dark_from": "19:00"},
     "privacy": {"online_check": True, "clipboard_history": False},  # Verlauf: nur im RAM, ab Werk aus
     "keep_icons_off_widgets": False,
     "popwin_file_dialog": False,
@@ -298,7 +301,7 @@ class ConfigManager(QObject):
                 self.path.replace(self.path.with_suffix(".broken.json"))
             except OSError:
                 pass
-            loaded = {}
+            loaded = self._newest_backup()
         data = _merge(DEFAULTS, loaded)
         migrate_themes(data)
         if loaded and "settings_v2_since_4" not in loaded:  # ab 4.0 Standard, auch wenn früher „aus“ gespeichert war
@@ -312,6 +315,18 @@ class ConfigManager(QObject):
         for profile in (data["monitor_shared"], *data["monitors"].values()):
             migrate_clock(profile)
         return data
+
+    def _newest_backup(self) -> dict:
+        """Ist settings.json kaputt, geht es mit dem neuesten lesbaren Backup weiter statt mit Standardwerten."""
+        for file in list_backups(self.path.parent / "backups"):
+            try:
+                loaded = json.loads(file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(loaded, dict):
+                log.warning("Einstellungen aus dem Backup %s wiederhergestellt", file.name)
+                return loaded
+        return {}
 
     def save(self) -> None:
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
@@ -555,6 +570,56 @@ def import_settings(config: "ConfigManager", path: Path) -> str:
     config.changed.emit("monitors")
     config.changed.emit("profile")
     return name
+
+
+BACKUP_DIR = DATA_DIR / "backups"
+BACKUPS_KEPT = 5
+
+
+def list_backups(folder: Path = BACKUP_DIR) -> list[Path]:
+    """Neueste zuerst. Der Dateiname trägt Datum und Uhrzeit, deshalb genügt die Sortierung nach Namen."""
+    return sorted(folder.glob("settings-*.json"), key=lambda file: file.name, reverse=True) if folder.is_dir() else []
+
+
+def backup_settings(path: Path = SETTINGS_PATH, folder: Path | None = None, stamp: str = "", keep: int = BACKUPS_KEPT) -> Path | None:
+    """Hebt eine Kopie der Einstellungen auf und behält die letzten `keep`. Unverändertes und Unlesbares wird nicht
+    noch einmal gesichert: Sonst verdrängten fünf gleiche oder eine kaputte Datei die brauchbaren Stände."""
+    import time
+    folder = folder or path.parent / "backups"
+    try:
+        text = path.read_text(encoding="utf-8")
+        if not isinstance(json.loads(text), dict):
+            return None
+    except (OSError, ValueError):
+        return None
+    existing = list_backups(folder)
+    try:
+        if existing and existing[0].read_text(encoding="utf-8") == text:
+            return None
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"settings-{stamp or time.strftime('%Y%m%d-%H%M%S')}.json"
+        target.write_text(text, encoding="utf-8")
+        for old in list_backups(folder)[keep:]:
+            old.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Einstellungs-Backup nicht möglich: %s", exc)
+        return None
+    return target
+
+
+def restore_backup(config: "ConfigManager", file: Path) -> None:
+    """Holt einen gesicherten Stand zurück. Der gemerkte Zustand der Windows-Taskleiste bleibt der von jetzt:
+    Mit dem alten Wert käme sie beim Beenden nicht richtig zurück."""
+    loaded = json.loads(Path(file).read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError("Das Backup enthält keine Einstellungen.")
+    taskbar_state = config.data.get("shell", {}).get("saved_taskbar_state")
+    _write_json(config.path, loaded)
+    config.data = config._load()
+    config.data["shell"]["saved_taskbar_state"] = taskbar_state
+    config.save()
+    config.changed.emit("monitors")
+    config.changed.emit("profile")
 
 
 def delete_preset(name: str, folder: Path = PRESETS_DIR) -> None:

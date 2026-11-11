@@ -23,7 +23,7 @@ class DragHover(QObject):
 
     def over(self, target) -> None:
         """`None` heißt: über nichts, das wechseln kann."""
-        if target is self.target:
+        if target is self.target or (target is not None and target == self.target):
             return
         self.target = target
         if target is None:

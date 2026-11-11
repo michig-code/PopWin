@@ -7480,6 +7480,190 @@ class GameMinimizesBehindNova(unittest.TestCase):
         self.assertFalse(self._fullscreen(0, False, self.NOVA))  # Spiel ist nicht abgelegt, nur nicht mehr Vollbild
 
 
+class DragHoverSwitch(unittest.TestCase):
+    """Hinhalten beim Ziehen: Die Uhr läuft nur bei einem neuen Ziel an und löst genau einmal aus."""
+
+    def test_same_target_does_not_restart_and_leave_cancels(self):
+        from ui.drag_switch import DragHover
+        hover = DragHover(hold_ms=10_000)
+        seen = []
+        hover.held.connect(seen.append)
+        first, second = object(), object()
+        hover.over(first)
+        left = hover._timer.remainingTime()
+        hover.over(first)
+        self.assertLessEqual(hover._timer.remainingTime(), left)  # nicht neu gestartet
+        hover._fire()
+        self.assertEqual(seen, [first])
+        hover.over(second)
+        self.assertTrue(hover._timer.isActive())
+        hover.leave()
+        self.assertFalse(hover._timer.isActive())
+        self.assertFalse(hover.active())
+        hover._fire()
+        self.assertEqual(seen, [first])  # nach dem Verlassen löst nichts mehr aus
+
+    def test_tab_index_zero_counts_as_target(self):
+        from ui.drag_switch import DragHover
+        hover = DragHover(hold_ms=10_000)
+        seen = []
+        hover.held.connect(seen.append)
+        hover.over(0)
+        self.assertTrue(hover.active())
+        hover._fire()
+        self.assertEqual(seen, [0])
+
+
+class QuickAnswers(unittest.TestCase):
+    def test_calculator_only_calculates(self):
+        from core.quick_answers import calculate
+        self.assertEqual(calculate("12*3+4"), "40")
+        self.assertEqual(calculate("2^10"), "1024")
+        self.assertEqual(calculate("15% von 80"), "12")
+        self.assertEqual(calculate("1,5+1"), "2,5")
+        self.assertEqual(calculate("sqrt(16)"), "4")
+        for text in ("2024", "chrome", "7zip", "__import__('os')", "open('x')", "1/0", "9**9**9", "(1).__class__", "x+1", "-5"):
+            self.assertIsNone(calculate(text), text)
+
+    def test_units_convert_only_within_one_kind(self):
+        from core.quick_answers import convert
+        self.assertEqual(convert("3 gb in mb"), "3072 mb")
+        self.assertEqual(convert("2 h in min"), "120 min")
+        self.assertEqual(convert("0 c in k"), "273.15 k")
+        self.assertEqual(convert("1,5 kg in g"), "1500 g")
+        self.assertIsNone(convert("5 km in kg"))
+        self.assertIsNone(convert("hallo in welt"))
+
+    def test_timer_and_prefixes(self):
+        from core import quick_answers
+        self.assertEqual(quick_answers.timer_minutes("timer 10"), 10)
+        self.assertIsNone(quick_answers.timer_minutes("timer"))
+        self.assertIsNone(quick_answers.timer_minutes("timer 999"))
+        self.assertEqual(quick_answers.split_web_prefix("w wetter"), "wetter")
+        self.assertIsNone(quick_answers.split_web_prefix("wetter"))
+        self.assertEqual(quick_answers.split_clip_prefix("v abc"), "abc")
+        self.assertIsNone(quick_answers.split_clip_prefix("vlc"))
+        self.assertEqual(quick_answers.web_search_url("a b&c", "google"), "https://www.google.com/search?q=a+b%26c")
+
+    def test_clip_history_keeps_newest_without_duplicates(self):
+        from core.quick_answers import ClipHistory
+        history = ClipHistory(3)
+        for text in ("a", "b", "", "a", "c", "d", "x" * 20000):
+            history.add(text)
+        self.assertEqual(history.items, ["d", "c", "a"])
+        self.assertEqual(history.search("C"), ["c"])
+
+    def test_file_index_finds_names_and_skips_deep_and_hidden(self):
+        from core.quick_answers import FileIndex
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        for name in ("Rechnung 2024.pdf", "a/rechnung alt.pdf", "a/b/c/d/zu_tief.txt", "node_modules/rechnung.js", ".git/rechnung"):
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text("", encoding="utf-8")
+        index = FileIndex([str(root)])
+        index.build()
+        self.assertEqual([Path(p).name for p in index.search("rechnung")], ["rechnung alt.pdf", "Rechnung 2024.pdf"])
+        self.assertEqual(index.search("tief"), [])
+        self.assertEqual(index.search("re"), [])  # zu kurz
+
+
+class WindowTilesAndSchedule(unittest.TestCase):
+    def test_tiles_meet_without_gaps(self):
+        from core.window_tiles import next_window, tile_rect
+        area = (0, 40, 2561, 1400)
+        left, right = tile_rect(area, "left"), tile_rect(area, "right")
+        self.assertEqual(left[0] + left[2], right[0])
+        self.assertEqual(right[0] + right[2], 2561)
+        top, bottom = tile_rect(area, "top_right"), tile_rect(area, "bottom_right")
+        self.assertEqual(top[1] + top[3], bottom[1])
+        self.assertEqual(next_window([5, 6, 7], 7, 1), 5)
+        self.assertEqual(next_window([5, 6, 7], 5, -1), 7)
+        self.assertEqual(next_window([5, 6], 9, 1), 5)
+        self.assertEqual(next_window([], 1, 1), 0)
+
+    def test_mode_follows_the_clock_also_across_midnight(self):
+        from core.schedule import mode_for, parse_clock
+        self.assertEqual(parse_clock("7:30", 0), 450)
+        self.assertEqual(parse_clock("quatsch", 5), 5)
+        self.assertEqual(mode_for(600, 420, 1140), "light")
+        self.assertEqual(mode_for(1140, 420, 1140), "dark")
+        self.assertEqual(mode_for(60, 1200, 300), "light")
+        self.assertEqual(mode_for(600, 1200, 300), "dark")
+
+    def test_rotation_starts_at_the_choice_and_shows_each_once(self):
+        from core.schedule import rotation_pick
+        choices = ["a", "b", "c"]
+        self.assertEqual([rotation_pick(choices, "b", minute, 10, False) for minute in (0, 10, 25)], ["b", "c", "a"])
+        mixed = [rotation_pick(choices, "b", step * 10, 10, True, seed=4) for step in range(3)]
+        self.assertEqual(mixed[0], "b")
+        self.assertEqual(sorted(mixed), choices)
+
+    def test_task_state_changes_with_title_focus_and_minimize(self):
+        from ui.taskbar import task_state
+        window = unittest.mock.Mock(hwnd=1, title="a")
+        groups = {"x.exe": {"target": "x", "name": "", "windows": [window]}}
+        minimized = {1: False}
+        base = task_state(groups, 1, minimized.get, [], (False,))
+        self.assertEqual(base, task_state(groups, 1, minimized.get, [], (False,)))
+        self.assertNotEqual(base, task_state(groups, 2, minimized.get, [], (False,)))
+        minimized[1] = True
+        self.assertNotEqual(base, task_state(groups, 1, minimized.get, [], (False,)))
+
+
+class WallpaperSavings(unittest.TestCase):
+    def test_big_gifs_are_not_cached(self):
+        self.assertFalse(wallpapers.gif_fits_cache(100, 2560, 1440))
+        self.assertTrue(wallpapers.gif_fits_cache(5, 1920, 1080))
+        self.assertFalse(wallpapers.gif_fits_cache(0, 10, 10))
+
+    def test_pauses_when_nobody_can_see_it(self):
+        play = wallpapers.should_play
+        self.assertTrue(play(False, [False, True], False, "cb"))  # ein Bildschirm ist frei
+        self.assertFalse(play(False, [True, True], False, "cb"))
+        self.assertTrue(play(False, [True], False, "b"))  # Verdecken zählt nur, wenn eingeschaltet
+        self.assertFalse(play(True, [], False, ""))
+        self.assertFalse(play(False, [False], True, "b"))
+        self.assertEqual(wallpapers.pause_flags({"pause_covered": False, "pause_on_battery": True}), "b")
+
+
+class SettingsBackups(unittest.TestCase):
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.path = self.folder / "settings.json"
+
+    def _save(self, number: int, stamp: str):
+        from config import config_manager
+        self.path.write_text(json.dumps({"n": number}), encoding="utf-8")
+        return config_manager.backup_settings(self.path, stamp=stamp)
+
+    def test_keeps_five_and_skips_unchanged_or_broken(self):
+        from config import config_manager
+        for number in range(7):
+            self.assertIsNotNone(self._save(number, f"2026111{number}-120000"))
+        self.assertIsNone(config_manager.backup_settings(self.path, stamp="20261120-120000"))  # unverändert
+        self.path.write_text("{kaputt", encoding="utf-8")
+        self.assertIsNone(config_manager.backup_settings(self.path, stamp="20261121-120000"))
+        names = [file.name for file in config_manager.list_backups(self.folder / "backups")]
+        self.assertEqual(len(names), 5)
+        self.assertEqual(names[0], "settings-20261116-120000.json")
+
+    def test_broken_settings_fall_back_to_newest_backup(self):
+        self._save(3, "20261111-120000")
+        self.path.write_text("{kaputt", encoding="utf-8")
+        self.assertEqual(ConfigManager(self.path).data["n"], 3)
+
+    def test_restore_keeps_the_saved_taskbar_state(self):
+        from config import config_manager
+        backup = self._save(1, "20261111-120000")
+        config = ConfigManager(self.path)
+        config.data["shell"]["saved_taskbar_state"] = 2
+        config.data["n"] = 9
+        config_manager.restore_backup(config, backup)
+        self.assertEqual(config.data["n"], 1)
+        self.assertEqual(config.data["shell"]["saved_taskbar_state"], 2)
+
+
 if __name__ == "__main__":
     result = unittest.main(exit=False).result
     release_contexts()  # sauber abbauen, bevor Python die Fenster in beliebiger Reihenfolge wegräumt
