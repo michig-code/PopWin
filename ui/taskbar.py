@@ -135,6 +135,15 @@ def shows_all_windows(window_filter: str, primary: bool) -> bool:
     return window_filter == "all"
 
 
+def task_state(groups: dict, foreground: int, is_minimized, notices: list, options: tuple) -> tuple:
+    """Alles, wovon das Aussehen der Task-Icons abhängt, als vergleichbarer Wert: Fenster samt Titel und Zustand,
+    das aktive Fenster, Benachrichtigungen und die Anzeige-Optionen."""
+    tasks = tuple((key, group["target"], group["name"],
+                   tuple((w.hwnd, w.title, bool(is_minimized(w.hwnd))) for w in group["windows"]))
+                  for key, group in groups.items())
+    return tasks, foreground, tuple(notices), options
+
+
 MEDIA_WIDTHS = {"controls": 118, "cover": 88}  # die anderen Stile nehmen die eingestellte Breite
 SEARCH_WIDTHS = {"pill": 96, "field": 170, "wide": 260}
 GLIDE_MS = 170  # wie schnell die Icons Platz machen
@@ -584,6 +593,7 @@ class Dock(BarWindow):
         super().__init__(ctx, screen, edge, theme_name)
         self._buttons: dict[str, TaskButton] = {}
         self._signature = None
+        self._state = None  # was die Icons zuletzt gezeigt haben; unverändert heißt: nichts anfassen
         self.setAcceptDrops(True)
         self._drag_hover = DragHover(self)  # Hinhalten beim Ziehen wechselt zur App
         self._drag_hover.held.connect(self._drag_held)
@@ -752,6 +762,7 @@ class Dock(BarWindow):
             self.ctx._windows_time = 0.0
         self._enforce_placement()
         self._place_in_z()
+        self._state = None
         if rebuild:
             self._signature = None
         elif self._buttons:
@@ -1362,6 +1373,7 @@ class Dock(BarWindow):
     def _commit_drop(self) -> None:
         self._dropping = None
         self._slot_origin = None
+        self._state = None
         self.save_order()
         self.apps.activate()
         self.refresh()
@@ -1617,6 +1629,14 @@ class Dock(BarWindow):
                 and set(signature[0]) == set(self._signature[0])
             self._signature = signature
             self._rearrange(groups) if only_order else self._rebuild(groups)
+            self._state = None
+        # Die meisten Durchläufe ändern nichts. Dann bleiben Stil, Indikatoren und Breite, wie sie sind,
+        # statt alle 0,7 s jeden Knopf neu zu stylen und die Leiste neu zu zeichnen.
+        state = task_state(groups, foreground, win_api.is_minimized, notices,
+                           (self.task_labels, self.task_badges, self.edge, self.theme_name))
+        if not force and state == self._state:
+            return
+        self._state = state
         for key, group in groups.items():
             button = self._buttons[key]
             button.windows = group["windows"]

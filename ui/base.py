@@ -488,11 +488,14 @@ class BarWindow(ThemedWindow):
             self._watching = True
             ForegroundWatch.get().changed.connect(self._on_foreground)
 
-    def _check_fullscreen(self) -> None:
+    def _check_fullscreen(self, fresh: bool = False) -> None:
         # Eigene Prüfung statt ABN_FULLSCREENAPP: Das Signal unterscheidet Monitore nicht zuverlässig,
         # und ein Spiel auf Monitor 1 soll die Leisten auf Monitor 2 nicht wegnehmen.
         self._enforce_placement()
-        self._fullscreen = win_api.fullscreen_on(native_rect(self.bar_screen))
+        monitor = native_rect(self.bar_screen)
+        # Topbar und Taskbar desselben Monitors fragen dasselbe: Der regelmäßige Blick teilt sich eine Antwort.
+        shared = None if fresh else getattr(self.ctx, "fullscreen_on", None)
+        self._fullscreen = shared(monitor) if shared else win_api.fullscreen_on(monitor)
         self._place_in_z()
         if not self._fullscreen and self._reposition_later:
             self._reposition_later = False
@@ -506,7 +509,7 @@ class BarWindow(ThemedWindow):
         if hwnd and win_api.fullscreen_window_on(hwnd, native_rect(self.bar_screen)):
             self.release_to_game()
             return
-        self._check_fullscreen()
+        self._check_fullscreen(fresh=True)
 
     def release_if_game_in_front(self) -> None:
         """Ein Menü hat den Fokus abgegeben. Ging er ans Spiel, verschwindet die Leiste im selben Moment wie das Menü."""

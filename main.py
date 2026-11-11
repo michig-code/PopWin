@@ -102,6 +102,7 @@ class PopWinApp(QObject):
         self._taskbar_hidden = False
         self._windows_cache: list[win_api.WindowInfo] = []
         self._windows_time = 0.0
+        self._fullscreen_cache: dict[tuple, tuple[float, bool]] = {}
 
         self.config.set("mode", win_api.system_mode(), notify=False)
         self.media.updated.connect(self._remember_media)
@@ -263,6 +264,14 @@ class PopWinApp(QObject):
             self._windows_cache = win_api.list_windows() + self._own_windows()
             self._windows_time = now
         return self._windows_cache
+
+    def fullscreen_on(self, monitor: tuple[int, int, int, int]) -> bool:
+        """Kurz zwischengespeichert: Topbar und Taskbar eines Monitors prüfen sonst beide alle 0,7 s jedes Fenster."""
+        now = time.monotonic()
+        cached = self._fullscreen_cache.get(monitor)
+        if cached is None or now - cached[0] > 0.25:
+            cached = self._fullscreen_cache[monitor] = (now, win_api.fullscreen_on(monitor))
+        return cached[1]
 
     def _own_windows(self) -> list[win_api.WindowInfo]:
         """list_windows lässt PopWin aus, die Einstellungen sollen aber wie eine App in der Taskbar stehen."""
