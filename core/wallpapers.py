@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +17,7 @@ import psutil
 from PySide6.QtCore import QThread, Signal
 
 from core import i18n, win_api
+from core.schedule import rotation_pick
 from core.paths import DATA_DIR, ROOT, app_command
 
 log = logging.getLogger(__name__)
@@ -180,16 +182,29 @@ class WallpaperPlayer:
         self.running_with: tuple = ()
         self.engine_started = False
         self.failures = 0
+        self.rotation_start = time.monotonic()
+        self.rotation_from = ""  # die Wahl, bei der der Wechsel begonnen hat
 
     def wanted(self, engine: str) -> tuple:
         """Ohne eigene Wahl passiert nichts: PopWin setzt von sich aus nie einen Hintergrund."""
         settings = self.ctx.config.get("wallpaper")
-        file = media_path(settings["file"])
+        file = media_path(self.current_choice(settings))
         if settings["source"] == ENGINE or not settings["enabled"] or not file or not os.path.exists(file):
             return ()
         if engine in (RUNNING, "") and settings["source"] == AUTO:  # "": die erste Prüfung steht noch aus, nicht vorschnell drüberlegen
             return ()
         return file, settings["screens"], pause_flags(settings)
+
+    def current_choice(self, settings: dict) -> str:
+        """Mit eingeschaltetem Wechsel der Hintergrund, der gerade dran ist; sonst der gewählte."""
+        choice, every = settings["file"], int(settings.get("rotate_minutes") or 0)
+        if not choice or every <= 0:
+            return choice
+        if choice != self.rotation_from:  # neu gewählt: Der Wechsel beginnt dort von vorn
+            self.rotation_from, self.rotation_start = choice, time.monotonic()
+        choices = [PRESET_PREFIX + key for key in PRESETS] + [str(path) for path in library()]
+        elapsed = (time.monotonic() - self.rotation_start) / 60
+        return rotation_pick(choices, choice, elapsed, every, bool(settings.get("rotate_shuffle")), seed=os.getpid())
 
     def _follow_source(self, engine: str) -> None:
         source = self.ctx.config.get("wallpaper.source")
