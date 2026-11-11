@@ -48,7 +48,9 @@ DEFAULTS: dict[str, Any] = {
     "language": "auto",
     "hide_missing_hardware": True,
     "network": {"hourly_test": False},
-    "wallpaper": {"enabled": False, "file": "", "screens": "all", "source": "auto"},
+    # pause_covered: ruht, solange Fenster den Desktop verdecken; pause_on_battery: ruht ohne Netzteil
+    "wallpaper": {"enabled": False, "file": "", "screens": "all", "source": "auto", "pause_covered": True,
+                  "pause_on_battery": True},
     "privacy": {"online_check": True},
     "keep_icons_off_widgets": False,
     "popwin_file_dialog": False,

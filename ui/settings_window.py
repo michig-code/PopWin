@@ -907,6 +907,8 @@ class SettingsWindow(NativeWindow):
         form = page.group("Animierter Hintergrund von PopWin", full=True)
         form.addRow(self._check("wallpaper.enabled", "Animierten Hintergrund abspielen"))
         form.addRow("Bildschirme", self._combo("wallpaper.screens", {"all": "Alle Bildschirme", "primary": "Nur dem Hauptmonitor"}))
+        form.addRow(self._check("wallpaper.pause_covered", "Pausieren, wenn Fenster den Desktop verdecken"))
+        form.addRow(self._check("wallpaper.pause_on_battery", "Im Akkubetrieb pausieren"))
         self.wall_list = QListWidget()
         self.wall_list.setFixedHeight(170)
         self.wall_list.itemClicked.connect(self._pick_wallpaper)

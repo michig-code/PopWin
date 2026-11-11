@@ -837,6 +837,41 @@ def fullscreen_on(monitor: tuple[int, int, int, int]) -> bool:
     return False
 
 
+def desktop_covered(monitor: tuple[int, int, int, int]) -> bool:
+    """Verdeckt ein maximiertes oder Vollbild-Fenster den Desktop auf diesem Monitor? Dann sieht niemand den Hintergrund."""
+    found = [False]
+
+    def callback(candidate, _lparam):
+        if not _counts_for_fullscreen(candidate) or not _is_task_window(candidate) or is_overlay(candidate):
+            return True
+        if user32.IsIconic(candidate):
+            return True
+        rect = window_rect(candidate)
+        if contains_center(rect, monitor) and (user32.IsZoomed(candidate) or _fills(candidate, monitor)):
+            found[0] = True
+            return False
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    return found[0]
+
+
+BELOW_NORMAL_PRIORITY = 0x4000
+kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+kernel32.SetProcessWorkingSetSize.argtypes = (wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t)
+
+
+def set_low_priority() -> None:
+    """Der eigene Prozess tritt hinter allem anderen zurück (Priorität „Niedriger als normal“)."""
+    kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), BELOW_NORMAL_PRIORITY)
+
+
+def trim_working_set() -> None:
+    """Gibt den gerade nicht gebrauchten Arbeitsspeicher des eigenen Prozesses an Windows zurück."""
+    kernel32.SetProcessWorkingSetSize(kernel32.GetCurrentProcess(), ctypes.c_size_t(-1).value, ctypes.c_size_t(-1).value)
+
+
 def is_topmost(hwnd: int) -> bool:
     return bool(user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
 
