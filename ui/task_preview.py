@@ -46,7 +46,10 @@ class WindowCard(QWidget):
             QVBoxLayout(self.thumb).addWidget(icon)
 
     def mouseReleaseEvent(self, event) -> None:
-        win_api.activate_window(self.window.hwnd)
+        if event.button() == Qt.MouseButton.MiddleButton:  # Mittelklick schließt das Fenster, wie bei Browser-Tabs
+            win_api.close_window(self.window.hwnd)
+        else:
+            win_api.activate_window(self.window.hwnd)
         self.preview.dismiss()
 
 

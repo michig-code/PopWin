@@ -17,6 +17,7 @@ from core.monitor_manager import native_rect
 from ui.animation import duration_of
 from core.notifications import badge_count, badge_text, notice_labels, visible_notices
 from core.replacements import launch, taskbar_slot
+from core.window_tiles import MAXIMIZE, TILES, next_window
 from core.dev import is_dev
 from ui.claude_button import ClaudeButton, is_claude_window
 from ui.clock_place import ClockFace, ClockPill
@@ -516,7 +517,51 @@ class TaskButton(QPushButton):
             event.accept()
             return
         self._press = None
+        if event.button() == Qt.MouseButton.MiddleButton and self.rect().contains(event.position().toPoint()):
+            target = self._launch_target()  # Mittelklick öffnet ein neues Fenster, wie bei Windows
+            if target:
+                launch(self.dock.ctx, target)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
+
+    def _launch_target(self) -> str:
+        return self.target or (self.key if self.key.startswith("popwin:") else "")
+
+    def wheelEvent(self, event) -> None:
+        """Das Mausrad blättert durch die Fenster dieser App."""
+        live = [w.hwnd for w in self.windows if win_api.is_window(w.hwnd)]
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if len(live) < 2 or not delta:
+            return super().wheelEvent(event)
+        self.dock.ctx.task_preview.dismiss()
+        win_api.activate_window(next_window(live, win_api.foreground_window(), -1 if delta > 0 else 1))
+        event.accept()
+
+    def _add_window_actions(self, menu: QMenu) -> None:
+        """Fenster anordnen und Ton der App: nur, wenn es etwas zu ordnen oder zu hören gibt."""
+        live = [w for w in self.windows if win_api.is_window(w.hwnd)]
+        if not live:
+            return
+        hwnd = next((w.hwnd for w in live if w.hwnd == win_api.foreground_window()), live[0].hwnd)
+        tiles = menu.addMenu("Fenster anordnen")
+        for place, entry in TILES.items():
+            tiles.addAction(entry[0], lambda p=place: win_api.tile_window(hwnd, p))
+        tiles.addSeparator()
+        tiles.addAction("Maximieren", lambda: win_api.tile_window(hwnd, MAXIMIZE))
+        audio = self._audio()
+        if audio is not None:
+            muted = audio.muted()
+            menu.addAction("Ton wieder an" if muted else "Stummschalten", lambda: audio.set_muted(not muted))
+
+    def _audio(self):
+        """Die Ton-Sitzung dieser App im Windows-Mixer, falls sie gerade eine hat."""
+        from core.audio_mixer import read_apps
+        names = {os.path.basename(w.exe).lower() for w in self.windows if w.exe}
+        try:
+            return next((app for app in read_apps() if app.key in names), None)
+        except Exception:  # ohne Tonausgabe gibt es nichts stummzuschalten
+            return None
 
     def _activate(self) -> None:
         # --- [Antigravity Start] Nur noch existierende Fenster beachten & minimierte Vordergrundfenster aktivieren ---
@@ -573,6 +618,7 @@ class TaskButton(QPushButton):
             menu.addAction(label, lambda: self.dock.toggle_pin(self))
         if self.windows:
             menu.addSeparator()
+            self._add_window_actions(menu)
             label = "Fenster schließen" if len(self.windows) == 1 else "Alle Fenster schließen"
             menu.addAction(label, lambda: [win_api.close_window(w.hwnd) for w in self.windows])
             if not any(w.popwin_app in win_api.INTERNAL_APPS for w in self.windows):

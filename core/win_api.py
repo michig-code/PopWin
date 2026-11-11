@@ -872,6 +872,36 @@ def trim_working_set() -> None:
     kernel32.SetProcessWorkingSetSize(kernel32.GetCurrentProcess(), ctypes.c_size_t(-1).value, ctypes.c_size_t(-1).value)
 
 
+def window_work_area(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Der Arbeitsbereich (ohne Leisten) des Monitors, auf dem das Fenster liegt."""
+    info = MONITORINFOEXW()
+    info.cbSize = ctypes.sizeof(info)
+    if user32.GetMonitorInfoW(_monitor_handle(hwnd), ctypes.byref(info)):
+        r = info.rcWork
+        return r.left, r.top, r.right, r.bottom
+    return None
+
+
+SW_MAXIMIZE = 3
+
+
+def tile_window(hwnd: int, place: str) -> None:
+    """Legt ein Fenster an eine Hälfte oder ein Viertel seines Monitors, oder maximiert es, und holt es nach vorn."""
+    from core.window_tiles import MAXIMIZE, tile_rect
+    if not user32.IsWindow(hwnd):
+        return
+    if place == MAXIMIZE:
+        user32.ShowWindow(hwnd, SW_MAXIMIZE)
+    else:
+        area = window_work_area(hwnd)
+        if area is None:
+            return
+        if user32.IsIconic(hwnd) or user32.IsZoomed(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)  # ein maximiertes Fenster lässt sich nicht verschieben
+        place_window(hwnd, *tile_rect(area, place))
+    activate_window(hwnd)
+
+
 def is_topmost(hwnd: int) -> bool:
     return bool(user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
 
