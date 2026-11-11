@@ -1213,8 +1213,8 @@ class Dock(BarWindow):
         if target is self.desktop:
             win_api.toggle_desktop()
             return
-        if not isinstance(target, TaskButton) or target.key not in self._buttons:
-            return
+        if not isinstance(target, TaskButton) or self._buttons.get(target.key) is not target:
+            return  # die Taskbar wurde inzwischen neu aufgebaut, den Knopf gibt es nicht mehr
         live = [w for w in target.windows if win_api.is_window(w.hwnd)]
         if len(live) == 1:
             win_api.activate_for_drop(live[0].hwnd)
@@ -1679,7 +1679,7 @@ class Dock(BarWindow):
         # Die meisten Durchläufe ändern nichts. Dann bleiben Stil, Indikatoren und Breite, wie sie sind,
         # statt alle 0,7 s jeden Knopf neu zu stylen und die Leiste neu zu zeichnen.
         state = task_state(groups, foreground, win_api.is_minimized, notices,
-                           (self.task_labels, self.task_badges, self.edge, self.theme_name))
+                           (self.task_labels, self.task_badges, self.edge, self.theme_name, self.width(), self._side_sizes()))
         if not force and state == self._state:
             return
         self._state = state
@@ -1702,6 +1702,13 @@ class Dock(BarWindow):
         self.marks.update()
         self._align_icons()
         self._fit_width()  # die Leiste wächst und schrumpft mit den Apps
+
+    def _side_sizes(self) -> tuple:
+        """Sichtbarkeit und Breite der festen Teile neben den Icons: Erscheint etwa der Player, muss die Mitte neu sitzen."""
+        parts = [self.start, self.search, self.media, self.nova, self.trash, self.desktop, self.clock]
+        if self.claude is not None:
+            parts.append(self.claude)
+        return tuple((part.isVisibleTo(self), part.width()) for part in parts)
 
     def _rearrange(self, groups: dict) -> None:
         """Nur die Reihenfolge ist neu: Die Knöpfe bleiben dieselben, ein Neuaufbau ließe alle Icons kurz aufblitzen."""
