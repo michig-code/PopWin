@@ -1050,6 +1050,10 @@ class SettingsWindow(NativeWindow):
                               "die du selbst einträgst. Der Speedtest spricht nur mit Cloudflare und nur, wenn du ihn startest "
                               "oder das stündliche Messen einschaltest. Fragst du im Explorer die KI, gehen Dateinamen aus dem offenen Ordner an Google."))
         form.addRow(page.text("Erweiterungen sind fremder Code und dürfen alles, was PopWin darf. Füge nur welche hinzu, denen du vertraust."))
+        form = page.group("Zwischenablage")
+        form.addRow(self._check("privacy.clipboard_history", "Verlauf der Zwischenablage merken (in der Suche mit „v “)"))
+        form.addRow(page.text("Die letzten 25 kopierten Texte bleiben nur im Arbeitsspeicher und sind nach dem Beenden von PopWin weg. "
+                              "Lass das aus, wenn du Passwörter kopierst."))
         form = page.group("Nova")
         form.addRow(self._check("nova.allow_memory", "Nova darf sich Dinge über dich merken"))
         form.addRow(self._check("nova.allow_screen", "Den Bildschirm ansehen"))
@@ -1261,6 +1265,10 @@ class SettingsWindow(NativeWindow):
         form.addRow(self.hotkey_status)
         form.addRow(self._check("launcher.live_actions", "Aktionen schon beim Tippen vorschlagen"))
         form.addRow(self._check("launcher.situation_actions", "Vorschläge zur Situation beim Öffnen"))
+        form.addRow(self._check("launcher.quick_answers", "Rechnen, Umrechnen und „timer 10“ direkt in der Suche"))
+        form.addRow(self._check("launcher.file_search", "Dateien nach Namen finden (Desktop, Dokumente, Downloads, Bilder)"))
+        form.addRow("Im Web suchen mit „w …“", self._combo("launcher.web_search", {
+            "duckduckgo": "DuckDuckGo", "google": "Google", "bing": "Bing", "startpage": "Startpage"}))
         page.note(
             "Beispiele: <b>darkmode aktivieren</b>, <b>regedit</b>, <b>shell:startup</b>, "
             "<b>? Wie hoch ist der Eiffelturm</b>. Der KI-Teil läuft nur mit Enter, nie beim Tippen.")

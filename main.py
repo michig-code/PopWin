@@ -36,6 +36,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from config.config_manager import ConfigManager  # noqa: E402
 from core import hardware, i18n, net_stats, paths, wallpapers, win_api, windows_pins  # noqa: E402
+from core.quick_answers import ClipHistory, FileIndex  # noqa: E402
 from core.version import VERSION  # noqa: E402
 from core.paths import LOG_DIR, app_command, app_shortcut  # noqa: E402
 from core.app_index import AppIndex  # noqa: E402
@@ -108,6 +109,10 @@ class PopWinApp(QObject):
         self.media.updated.connect(self._remember_media)
         self.status.updated.connect(self._follow_system_mode)
 
+        # Dateisuche und Zwischenablage-Verlauf der Suche; beide bleiben leer, solange ihre Einstellung aus ist.
+        self.files = FileIndex([str(Path.home() / name) for name in ("Desktop", "Documents", "Downloads", "Pictures")])
+        self.clips = ClipHistory()
+        QGuiApplication.clipboard().dataChanged.connect(self._remember_clip)
         self.task_preview = TaskPreview(self)
         self.tasks = TaskController(self)
         self.nova = NovaController(self)
@@ -403,6 +408,13 @@ class PopWinApp(QObject):
     def set_dark_mode(self, mode: str) -> None:
         win_api.set_system_mode(mode)
         self.theme.set_mode(mode)
+
+    def _remember_clip(self) -> None:
+        """Nur Text, nur im Arbeitsspeicher, und nur, wenn der Verlauf unter Datenschutz eingeschaltet ist."""
+        if self.config.get("privacy.clipboard_history"):
+            self.clips.add(QGuiApplication.clipboard().text())
+        elif self.clips.items:
+            self.clips.clear()
 
     def _remember_media(self, media) -> None:
         self.last_media = media

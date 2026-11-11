@@ -51,7 +51,7 @@ DEFAULTS: dict[str, Any] = {
     # pause_covered: ruht, solange Fenster den Desktop verdecken; pause_on_battery: ruht ohne Netzteil
     "wallpaper": {"enabled": False, "file": "", "screens": "all", "source": "auto", "pause_covered": True,
                   "pause_on_battery": True},
-    "privacy": {"online_check": True},
+    "privacy": {"online_check": True, "clipboard_history": False},  # Verlauf: nur im RAM, ab Werk aus
     "keep_icons_off_widgets": False,
     "popwin_file_dialog": False,
     "desktop_groups": {"style": "off", "layout": {"order": [], "groups": {}}},
@@ -110,6 +110,9 @@ DEFAULTS: dict[str, Any] = {
         "voice_seconds": 12,
         "live_actions": True,
         "situation_actions": True,
+        "quick_answers": True,  # Rechner, Umrechnen und „timer 10“ direkt in der Suche
+        "file_search": True,  # Dateien nach Namen in Desktop, Dokumente, Downloads, Bilder
+        "web_search": "duckduckgo",  # Suchmaschine für „w …“; core.quick_answers.SEARCH_ENGINES
         "width": 640,
         "position": "upper",
         "screen": "cursor",

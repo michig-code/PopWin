@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import i18n, win_api
+from core import quick_answers
 from core.ai_actions import settings_catalog
 from core.gemini_client import GeminiWorker, PlanWorker
 from core.replacements import launch
@@ -179,6 +180,9 @@ class SearchLauncher(ThemedWindow):
         self.results.setStyleSheet(f"#Results {{ font-size: {config['result_font']}px; }}")
 
     def open(self) -> None:
+        files = getattr(self.ctx, "files", None)
+        if files is not None and self.ctx.config.get("launcher.file_search", True):
+            files.refresh()  # liest im Hintergrund neu, wenn die Liste fehlt oder älter als ein paar Minuten ist
         self.apply_theme()
         self.input.clear()
         self._opening = True
@@ -239,7 +243,17 @@ class SearchLauncher(ThemedWindow):
             return []
         if split_ai_prefix(query) is not None:
             return []
+        clip_query = quick_answers.split_clip_prefix(text.lstrip())
+        clips = getattr(self.ctx, "clips", None)
+        if clip_query is not None and clips is not None and self.ctx.config.get("privacy.clipboard_history"):
+            return [Result(quick_answers.clip_label(item), lambda t=item: QApplication.clipboard().setText(t), glyph=G.DOC)
+                    for item in clips.search(clip_query)]
+        web_query = quick_answers.split_web_prefix(query)
+        if web_query:
+            return [self._web_result(web_query)]
         results: list[Result] = []
+        if config.get("quick_answers", True):
+            results += self._quick_answers(query)
         if config["live_actions"]:
             results += [Result(s.label, s.action, glyph=s.glyph) for s in typed_actions(self.ctx, query)]
         mode = parse_mode_command(query)
@@ -257,6 +271,27 @@ class SearchLauncher(ThemedWindow):
                         if cmd.startswith(lowered) or lowered in desc.lower()][:3]
             if is_run_target(query):
                 results.append(Result(f"Ausführen: {query}", lambda: run_command(query)))
+        files = getattr(self.ctx, "files", None)
+        if files is not None and config.get("file_search", True):
+            results += [Result(f"{os.path.basename(path)}  ·  {os.path.basename(os.path.dirname(path))}",
+                               lambda p=path: win_api.shell_open(p), path) for path in files.search(query, 4)]
+        if not results and not config["ai_fallback"]:  # mit KI-Fallback fragt Enter stattdessen die KI
+            results.append(self._web_result(query))
+        return results
+
+    def _web_result(self, query: str) -> Result:
+        url = quick_answers.web_search_url(query, self.ctx.config.get("launcher.web_search", "duckduckgo"))
+        return Result(f"Im Web suchen: {query}", lambda: win_api.shell_open(url), glyph=G.SEARCH)
+
+    def _quick_answers(self, query: str) -> list[Result]:
+        """Rechner, Umrechnen und Timer: Die Antwort steht ganz oben, Enter kopiert sie."""
+        results: list[Result] = []
+        answer = quick_answers.convert(query) or quick_answers.calculate(query)
+        if answer:
+            results.append(Result(f"= {answer}", lambda: QApplication.clipboard().setText(answer), glyph=G.QUICK))
+        minutes = quick_answers.timer_minutes(query)
+        if minutes:
+            results.append(Result(f"Fokus-Timer starten ({minutes} Minuten)", lambda: self.ctx.focus.start(minutes), glyph=G.STOPWATCH))
         return results
 
     def _fit_height(self) -> None:
