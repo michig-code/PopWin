@@ -281,7 +281,7 @@ class SearchLauncher(ThemedWindow):
 
     def _web_result(self, query: str) -> Result:
         url = quick_answers.web_search_url(query, self.ctx.config.get("launcher.web_search", "duckduckgo"))
-        return Result(f"Im Web suchen: {query}", lambda: win_api.shell_open(url), glyph=G.SEARCH)
+        return Result(i18n.translate(f"Im Web suchen: {query}"), lambda: win_api.shell_open(url), glyph=G.SEARCH)
 
     def _quick_answers(self, query: str) -> list[Result]:
         """Rechner, Umrechnen und Timer: Die Antwort steht ganz oben, Enter kopiert sie."""
@@ -291,7 +291,8 @@ class SearchLauncher(ThemedWindow):
             results.append(Result(f"= {answer}", lambda: QApplication.clipboard().setText(answer), glyph=G.QUICK))
         minutes = quick_answers.timer_minutes(query)
         if minutes:
-            results.append(Result(f"Fokus-Timer starten ({minutes} Minuten)", lambda: self.ctx.focus.start(minutes), glyph=G.STOPWATCH))
+            results.append(Result(i18n.translate(f"Fokus-Timer starten ({minutes} Minuten)"), lambda: self.ctx.focus.start(minutes),
+                                  glyph=G.STOPWATCH))
         return results
 
     def _fit_height(self) -> None:
