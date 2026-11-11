@@ -183,6 +183,7 @@
   "Befehlspalette": "Palette de commandes",
   "Beim Speichern formatieren": "Mettre en forme à l'enregistrement",
   "Beim Start nach Updates suchen": "Rechercher des mises à jour au démarrage",
+  "Beim Ziehen über einem Task hinhalten wechselt zur App": "Maintenir un élément glissé sur une tâche bascule vers cette application",
   "Beispiele: <b>darkmode aktivieren</b>, <b>regedit</b>, <b>shell:startup</b>, <b>? Wie hoch ist der Eiffelturm</b>. Der KI-Teil läuft nur mit Enter, nie beim Tippen.": "Exemples : <b>darkmode aktivieren</b>, <b>regedit</b>, <b>shell:startup</b>, <b>? Quelle est la hauteur de la tour Eiffel</b>. La partie IA ne s'exécute qu'avec Entrée, jamais pendant la saisie.",
   "Belegung aller Laufwerke": "Utilisation de tous les disques",
   "Belegung in GB anzeigen": "Afficher l'utilisation en Go",

@@ -1156,6 +1156,7 @@ class SettingsWindow(NativeWindow):
             "all": "Hauptmonitor-Apps überall, dazu die eigenen jedes Monitors",
             "primary": "Jeder Monitor zeigt nur seine eigenen Apps"}))
         form.addRow(self._check("taskbar.preview", "Vorschau beim Draufbleiben auf einem Task"))
+        form.addRow(self._check("taskbar.drag_switch", "Beim Ziehen über einem Task hinhalten wechselt zur App"))
         take_over = QPushButton("Apps der Windows-Taskleiste übernehmen", objectName="Secondary")
         take_over.clicked.connect(self.ctx.import_windows_pins)
         form.addRow(take_over)

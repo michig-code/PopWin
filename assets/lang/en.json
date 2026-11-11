@@ -183,6 +183,7 @@
   "Befehlspalette": "Command palette",
   "Beim Speichern formatieren": "Format on save",
   "Beim Start nach Updates suchen": "Check for updates at start",
+  "Beim Ziehen über einem Task hinhalten wechselt zur App": "Hold a dragged item over a task to switch to that app",
   "Beispiele: <b>darkmode aktivieren</b>, <b>regedit</b>, <b>shell:startup</b>, <b>? Wie hoch ist der Eiffelturm</b>. Der KI-Teil läuft nur mit Enter, nie beim Tippen.": "Examples: <b>darkmode aktivieren</b>, <b>regedit</b>, <b>shell:startup</b>, <b>? How tall is the Eiffel Tower</b>. The AI part only runs on Enter, never while typing.",
   "Belegung aller Laufwerke": "Usage of all drives",
   "Belegung in GB anzeigen": "Show usage in GB",

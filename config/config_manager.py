@@ -81,6 +81,7 @@ DEFAULTS: dict[str, Any] = {
         "screen_pins": {},
         "order": {},
         "preview": True,
+        "drag_switch": True,  # beim Ziehen über einem Task hinhalten wechselt zur App
         "magnify": False,  # Beta: Icons wachsen wie am Mac, wenn die Maus darüber fährt
         "pinned": [
             {"name": "Explorer", "target": "explorer.exe"},

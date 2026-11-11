@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QBoxLayout, QHBoxLayout, QLabel, QPushButton, QSiz
 from core import win_api
 from ui.animation import WindowAnimator
 from ui.base import G, IconButton, ThemedWindow, icon_for_target
+from ui.drag_switch import DragHover
 
 CARD_WIDTH, THUMB_HEIGHT = 220, 130
 MAX_CARDS = 4
@@ -85,6 +86,9 @@ class TaskPreview(ThemedWindow):
         self._show_timer.timeout.connect(self._present)
         self._hide_timer = QTimer(self, singleShot=True, interval=self.DELAY_HIDE)
         self._hide_timer.timeout.connect(self.dismiss)
+        self.setAcceptDrops(True)  # nur zum Hinhalten beim Ziehen; ablegen lässt sich hier nichts
+        self._drag_hover = DragHover(self)
+        self._drag_hover.held.connect(self._drag_held)
 
     # --- Steuerung durch die Taskbar ------------------------------------------
     def hover(self, button) -> None:
@@ -108,7 +112,50 @@ class TaskPreview(ThemedWindow):
 
     def dismiss(self) -> None:
         self._show_timer.stop()
+        self._drag_hover.leave()
         self.animator.leave(self._release)
+
+    # --- Hinhalten beim Ziehen ---------------------------------------------------
+    def show_for_drag(self, button) -> None:
+        """Die Taskbar hält etwas Gezogenes über einem Task mit mehreren Fenstern: sofort zeigen, auch ohne Einstellung."""
+        self._hide_timer.stop()
+        self._show_timer.stop()
+        if button is self.button and self.isVisible() and not self.animator.closing:
+            return
+        self.button = button
+        self._present()
+
+    def _card_at(self, position: QPoint) -> "WindowCard | None":
+        widget = self.childAt(position)
+        while widget is not None and widget is not self:
+            if isinstance(widget, WindowCard):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
+    def dragEnterEvent(self, event) -> None:
+        self._hide_timer.stop()
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.accept()
+
+    def dragMoveEvent(self, event) -> None:
+        self._drag_hover.over(self._card_at(event.position().toPoint()))
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._drag_hover.leave()
+        self._hide_timer.start()
+
+    def dropEvent(self, event) -> None:
+        self._drag_hover.leave()
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.ignore()
+
+    def _drag_held(self, card) -> None:
+        if card in self._cards:
+            win_api.activate_for_drop(card.window.hwnd)
+            self.dismiss()
 
     def _release(self) -> None:
         for handle in self._thumbnails:

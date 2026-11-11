@@ -919,6 +919,22 @@ def activate_window(hwnd: int) -> None:
     # --- [Antigravity Ende] ---
 
 
+def activate_for_drop(hwnd: int) -> None:
+    """Holt ein Fenster nach vorn, während ein anderes Programm gerade etwas zieht (Hinhalten über der Taskbar).
+    Ohne AttachThreadInput: Das koppelte PopWin an den Thread, der zieht, und der Drag könnte dabei abbrechen."""
+    if not user32.IsWindow(hwnd):
+        return
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+    if user32.GetForegroundWindow() == hwnd:
+        return
+    send_keys(VK_DUMMY)  # nach einer eigenen Eingabe erlaubt Windows den Wechsel in den Vordergrund
+    user32.BringWindowToTop(hwnd)
+    user32.SetForegroundWindow(hwnd)
+    if user32.GetForegroundWindow() != hwnd:
+        user32.SwitchToThisWindow(hwnd, True)
+
+
 def is_minimized(hwnd: int) -> bool:
     return bool(user32.IsIconic(hwnd))
 

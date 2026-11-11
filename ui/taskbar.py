@@ -21,6 +21,7 @@ from core.dev import is_dev
 from ui.claude_button import ClaudeButton, is_claude_window
 from ui.clock_place import ClockFace, ClockPill
 from ui.dock_tools import TOOL_ITEMS, ToolRow
+from ui.drag_switch import DragHover
 from ui import sidebar  # [Antigravity]
 from ui.base import BarWindow, G, IconButton, NovaButton, glyph_icon, icon_for_target, in_hot_zone, set_prop, themed_menu  # noqa: F401
 
@@ -584,6 +585,8 @@ class Dock(BarWindow):
         self._buttons: dict[str, TaskButton] = {}
         self._signature = None
         self.setAcceptDrops(True)
+        self._drag_hover = DragHover(self)  # Hinhalten beim Ziehen wechselt zur App
+        self._drag_hover.held.connect(self._drag_held)
 
         row = QHBoxLayout(self.root)
         row.setContentsMargins(6, 3, 6, 3)
@@ -732,6 +735,7 @@ class Dock(BarWindow):
         self._dropping = None
         self._order_held = False
         self._slot_origin = None
+        self._drag_hover.leave()
         set_prop(self.root, "dropping", False)
         for button in list(self._buttons.values()):
             button.reset_state()
@@ -1028,7 +1032,8 @@ class Dock(BarWindow):
         menu = self.ctx.start_menu
         mine = menu.anchor is self.start or (menu.anchor is None and self.ctx.monitors.is_primary(self.bar_screen))
         on_tools = self.tools is not None and self.tools.isVisible() and self.tools.frameGeometry().contains(QCursor.pos())
-        return (on_tools or self._dragged is not None or self._dropping is not None or QApplication.activePopupWidget() is not None
+        return (on_tools or self._dragged is not None or self._dropping is not None or self._drag_hover.active()
+                or QApplication.activePopupWidget() is not None
                 or self.ctx.task_preview.isVisible() or (menu.isVisible() and not menu.animator.closing and mine))
 
     def bar_size(self) -> int:
@@ -1089,22 +1094,75 @@ class Dock(BarWindow):
     def _icon_size(self) -> int:
         return min(self.option("icon_size"), self.bar_size() - 12)
 
-    # --- Anheften per Drag and Drop -------------------------------------------
+    # --- Anheften per Drag and Drop, Hinhalten wechselt die App -----------------
+    @staticmethod
+    def _pinnable(mime) -> bool:
+        urls = mime.urls()
+        return bool(urls) and all(u.isLocalFile() for u in urls)
+
+    def _drag_target(self, position: QPoint) -> QWidget | None:
+        """Der Task mit offenen Fenstern oder der Knopf „Desktop anzeigen“ unter dem Gezogenen, sonst nichts."""
+        if not self.ctx.config.get("taskbar.drag_switch", True):
+            return None
+        widget = self.childAt(position)
+        while widget is not None and widget is not self:
+            if widget is self.desktop or (isinstance(widget, TaskButton) and widget.windows):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
     def dragEnterEvent(self, event) -> None:
-        urls = event.mimeData().urls()
-        if urls and all(u.isLocalFile() for u in urls):
+        # Alles annehmen, auch Text und Bilder: Ohne das meldet Qt keine Bewegung, und das Hinhalten bliebe unbemerkt.
+        if self._pinnable(event.mimeData()):
             set_prop(self.root, "dropping", True)
             event.acceptProposedAction()
+        elif self.ctx.config.get("taskbar.drag_switch", True):
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.accept()
+
+    def dragMoveEvent(self, event) -> None:
+        target = self._drag_target(event.position().toPoint())
+        self._drag_hover.over(target)
+        pinnable = target is None and self._pinnable(event.mimeData())
+        set_prop(self.root, "dropping", pinnable)
+        if pinnable:
+            event.acceptProposedAction()
+        else:  # über einem Task lässt sich nichts ablegen, wie bei Windows
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.ignore()
 
     def dragLeaveEvent(self, event) -> None:
+        self._drag_hover.leave()
         set_prop(self.root, "dropping", False)
+        # Zeigt die Vorschau gerade die Fenster zum Ablegen, bleibt sie kurz stehen, bis der Zeiger auf ihr ist.
+        if self.ctx.task_preview.isVisible():
+            self.ctx.task_preview.unhover()
 
     def dropEvent(self, event) -> None:
+        target = self._drag_target(event.position().toPoint())
+        self._drag_hover.leave()
         set_prop(self.root, "dropping", False)
+        if target is not None or not self._pinnable(event.mimeData()):
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.ignore()
+            return
         paths = [os.path.normpath(u.toLocalFile()) for u in event.mimeData().urls()]
         event.acceptProposedAction()
         # Der Explorer wartet, bis dieser Handler zurückkehrt.
         QTimer.singleShot(0, lambda: self.pin_paths(paths))
+
+    def _drag_held(self, target) -> None:
+        """Das Gezogene stand lange genug über `target`: zur App wechseln, damit man dort ablegen kann."""
+        if target is self.desktop:
+            win_api.toggle_desktop()
+            return
+        if not isinstance(target, TaskButton) or target.key not in self._buttons:
+            return
+        live = [w for w in target.windows if win_api.is_window(w.hwnd)]
+        if len(live) == 1:
+            win_api.activate_for_drop(live[0].hwnd)
+        elif live:  # mehrere Fenster: Die Vorschau zeigt sie, Hinhalten über einer Karte wählt eines
+            self.ctx.task_preview.show_for_drag(target)
 
     def pin_paths(self, paths: list[str]) -> None:
         self._store_pins(merge_pins(self._own_pins(), [pin_for_path(p) for p in paths]))
