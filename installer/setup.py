@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-VERSION = "4.5.0"  # bei jeder neuen Ausgabe erhöhen, daran erkennt das Setup ein Update
+VERSION = "4.5.1"  # bei jeder neuen Ausgabe erhöhen, daran erkennt das Setup ein Update
 APP_NAME = "PopWin"
 EXE_NAME = "PopWin.exe"
 UNINSTALLER = "Deinstallieren.exe"
@@ -374,6 +374,45 @@ def _matching_processes(folder: Path, attrs: list[str]) -> list:
     return matches
 
 
+class StillRunning(RuntimeError):
+    """Ein PopWin aus dem Zielordner lässt sich nicht beenden, meist weil es mit Administratorrechten läuft."""
+
+    def __init__(self, pids: list[int]):
+        self.pids = pids
+        listed = ", ".join(str(pid) for pid in pids)
+        super().__init__(f"PopWin läuft noch (Prozess {listed}) und lässt sich vom Setup nicht beenden. "
+                         "Bitte PopWin schließen, notfalls im Task-Manager, und das Setup noch einmal starten.")
+
+
+def _alive(process) -> bool:
+    import psutil
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True  # nicht lesbar, aber noch da
+
+
+def wait_gone(processes: list, timeout: float) -> list:
+    """Wie psutil.wait_procs, wirft aber nie. Darf das Setup auf einen Prozess nicht warten
+    (er läuft mit Adminrechten), meldete psutil nur „(pid=280)“ und die ganze Installation brach ab."""
+    import psutil
+    if not processes:
+        return []
+    try:
+        _gone, alive = psutil.wait_procs(processes, timeout=timeout)
+        return list(alive)
+    except psutil.Error:
+        pass
+    end = time.monotonic() + timeout
+    alive = [process for process in processes if _alive(process)]
+    while alive and time.monotonic() < end:
+        time.sleep(0.2)
+        alive = [process for process in alive if _alive(process)]
+    return alive
+
+
 def stop_running(folder: Path) -> bool:
     """Beendet PopWin im Installationsordner und sagt, ob es lief; fremde Programme bleiben unberührt.
 
@@ -395,8 +434,11 @@ def stop_running(folder: Path) -> bool:
             process.terminate()
         except psutil.Error:
             pass
-    if to_stop:
-        psutil.wait_procs(to_stop, timeout=8)
+    for process in wait_gone(to_stop, 8):  # wehrt sich eins, kommt es hart dran; end_leftovers prüft danach
+        try:
+            process.kill()
+        except psutil.Error:
+            pass
     return was_running
 
 
@@ -406,14 +448,15 @@ def end_leftovers(folder: Path) -> None:
     left = _matching_processes(folder, ["exe"])
     if not left:
         return
-    _, alive = psutil.wait_procs(left, timeout=WATCHDOG_WAIT)
+    alive = wait_gone(left, WATCHDOG_WAIT)
     for process in alive:
         try:
             process.kill()
         except psutil.Error:
             pass
-    if alive:
-        psutil.wait_procs(alive, timeout=2)
+    stuck = wait_gone(alive, 2)
+    if stuck:
+        raise StillRunning([process.pid for process in stuck])
 
 
 def _writable(function, path, _error) -> None:
@@ -705,6 +748,18 @@ def remove_shell_integration() -> None:
             pass
 
 
+def readable_error(exc: Exception) -> str:
+    """psutil-Fehler sagen sonst nur „(pid=280)“. Das versteht niemand."""
+    text = str(exc) or exc.__class__.__name__
+    module = type(exc).__module__ or ""
+    if module.startswith("psutil"):
+        pid = getattr(exc, "pid", None)
+        where = f" (Prozess {pid})" if pid else ""
+        return (f"Ein laufendes Programm{where} ließ sich nicht prüfen oder beenden. "
+                "Bitte PopWin schließen und das Setup noch einmal starten.")
+    return text
+
+
 class InstallThread(QThread):
     progress = Signal(int)
     status = Signal(str)
@@ -726,11 +781,14 @@ class InstallThread(QThread):
         except zipfile.BadZipFile:
             self.failed.emit("Das Installationspaket ist beschädigt.", False)
             return
+        except StillRunning as exc:
+            self.failed.emit(str(exc), not is_admin())  # mit Adminrechten lässt es sich beenden
+            return
         except OSError as exc:
             self.failed.emit(exc.strerror or str(exc), False)
             return
         except Exception as exc:
-            self.failed.emit(str(exc) or exc.__class__.__name__, False)
+            self.failed.emit(readable_error(exc), False)
             return
         self.done.emit()
 
@@ -818,7 +876,7 @@ class UninstallThread(QThread):
         try:
             self._uninstall()
         except Exception as exc:
-            self.failed.emit(str(exc) or exc.__class__.__name__)
+            self.failed.emit(readable_error(exc))
             return
         self.done.emit()
 

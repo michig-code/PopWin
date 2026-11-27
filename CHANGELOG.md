@@ -1,5 +1,9 @@
 ﻿# Änderungen
 
+## 4.5.1
+
+- **Setup repariert:** Die Installation brach ab, wenn noch ein PopWin lief, das sich nicht beenden ließ (zum Beispiel mit Administratorrechten), und zeigte nur „pid 280“. Jetzt beendet das Setup laufende PopWins zuverlässig. Klappt das nicht, sagt es klar, was zu tun ist, und bietet „Als Administrator installieren“ an.
+
 ## 4.5.0
 
 - **Neues Design „Aurora“** ist jetzt Standard, das bisherige Design bleibt als „Klassisch (Liquid Glass)“ wählbar.

@@ -2346,6 +2346,54 @@ def load_setup():
     return module
 
 
+class SetupStopsPopWin(unittest.TestCase):
+    """Das Setup beendet laufende PopWins. Durfte es auf eins nicht warten, brach die Installation mit „(pid=280)“ ab."""
+
+    def setUp(self):
+        self.setup = load_setup()
+
+    def test_waiting_never_throws(self):
+        stuck = unittest.mock.Mock(pid=280)
+        stuck.is_running.side_effect = psutil.AccessDenied(280)  # nicht lesbar: gilt als noch da
+        gone = unittest.mock.Mock(pid=281)
+        gone.is_running.return_value = False
+        with unittest.mock.patch("psutil.wait_procs", side_effect=psutil.AccessDenied(280)):
+            alive = self.setup.wait_gone([stuck, gone], 0.3)
+        self.assertEqual(alive, [stuck])
+        self.assertEqual(self.setup.wait_gone([], 5), [])
+
+    def test_a_popwin_that_will_not_end_gets_a_clear_message(self):
+        stuck = unittest.mock.Mock(pid=280)
+        stuck.kill.side_effect = psutil.AccessDenied(280)
+        with unittest.mock.patch.object(self.setup, "_matching_processes", return_value=[stuck]), \
+                unittest.mock.patch.object(self.setup, "wait_gone", side_effect=lambda procs, timeout: list(procs)):
+            with self.assertRaises(self.setup.StillRunning) as caught:
+                self.setup.end_leftovers(Path("C:/PopWin"))
+        self.assertIn("280", str(caught.exception))
+        self.assertIn("schließen", str(caught.exception))
+
+    def test_ended_popwins_pass(self):
+        process = unittest.mock.Mock(pid=5)
+        with unittest.mock.patch.object(self.setup, "_matching_processes", return_value=[process]), \
+                unittest.mock.patch.object(self.setup, "wait_gone", return_value=[]):
+            self.setup.end_leftovers(Path("C:/PopWin"))
+        process.kill.assert_not_called()
+
+    def test_stubborn_process_in_stop_running_is_killed(self):
+        process = unittest.mock.Mock(pid=7, info={"cmdline": ["PopWin.exe"]})
+        with unittest.mock.patch.object(self.setup, "_matching_processes", return_value=[process]), \
+                unittest.mock.patch.object(self.setup, "wait_gone", return_value=[process]):
+            self.assertTrue(self.setup.stop_running(Path("C:/PopWin")))
+        process.terminate.assert_called_once()
+        process.kill.assert_called_once()
+
+    def test_psutil_errors_read_like_words(self):
+        text = self.setup.readable_error(psutil.AccessDenied(280))
+        self.assertIn("Prozess 280", text)
+        self.assertNotIn("pid=", text)
+        self.assertEqual(self.setup.readable_error(ValueError("kaputt")), "kaputt")
+
+
 class SetupFolder(unittest.TestCase):
     def setUp(self):
         self.setup = load_setup()
