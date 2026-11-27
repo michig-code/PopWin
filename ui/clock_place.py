@@ -38,6 +38,7 @@ class ClockFace(QWidget):
         self.timer = QTimer(self, interval=1000)
         self.timer.timeout.connect(self.tick)
         self.timer.start()
+        self._last_texts: tuple[str, str] | None = None
         self.arrange()
 
     def arrange(self, one_line: bool | None = None) -> None:
@@ -49,6 +50,9 @@ class ClockFace(QWidget):
 
     def tick(self) -> None:
         time, date = clock_texts(self.profile(), QDateTime.currentDateTime())
+        if (time, date) == self._last_texts:
+            return
+        self._last_texts = (time, date)
         self.time_label.setText(time)
         self.date_label.setText(date)
         self.time_label.setVisible(bool(time))
@@ -62,6 +66,7 @@ class ClockPill(ThemedWindow):
         super().__init__(dock.ctx, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
                          | Qt.WindowType.WindowTransparentForInput | Qt.WindowType.NoDropShadowWindowHint, dock.theme_name)
         self.dock = dock
+        self._last_state: tuple[str, str, int, int, int, int, str] | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -75,6 +80,11 @@ class ClockPill(ThemedWindow):
         row.addWidget(self.frame)
         self.apply_theme()
 
+    def apply_theme(self) -> None:
+        # Theme- oder Schriftwechsel ändern die Größe, ohne dass sich Text oder Dock bewegen: beim nächsten follow() neu messen.
+        self._last_state = None
+        super().apply_theme()
+
     def follow(self) -> None:
         """Steht, wo die Taskbar gerade sichtbar ist; ist sie weg, ist die Uhr auch weg."""
         dock = self.dock
@@ -84,15 +94,19 @@ class ClockPill(ThemedWindow):
             self.hide()
             return
         self.face.tick()
-        self.adjustSize()
         area = dock.frameGeometry()
-        x = area.center().x() - self.width() // 2
         under = 0  # steht die Symbolleiste unten und ist gerade da, rückt die Uhr über sie
         if sits_below(dock.option("dock_stack_order"), "tools") and showing(dock.tools):
             under = dock.tools.height()
-        self.move(x, stacked_y(dock.edge, area.top(), area.bottom(), self.height(), PILL_GAP, under))
-        if not self.isVisible():
-            self.show()
+        state = (self.face.time_label.text(), self.face.date_label.text(),
+                 area.x(), area.y(), area.width(), area.height(), dock.edge, under)
+        if state != self._last_state or not self.isVisible():
+            self._last_state = state
+            self.adjustSize()
+            x = area.center().x() - self.width() // 2
+            self.move(x, stacked_y(dock.edge, area.top(), area.bottom(), self.height(), PILL_GAP, under))
+            if not self.isVisible():
+                self.show()
 
 
 class PlacePicker(QWidget):

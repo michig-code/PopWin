@@ -1,5 +1,22 @@
 ﻿# Änderungen
 
+## 4.5.0
+
+- **Neues Design „Aurora“** ist jetzt Standard, das bisherige Design bleibt als „Klassisch (Liquid Glass)“ wählbar.
+- **Sprache folgt Windows:** PopWin übernimmt die Windows-Anzeigesprache automatisch und lässt sich unter Einstellungen → Design → Sprache und Region umstellen. Neu dazu kommen Deutsch, Italienisch, Niederländisch, Polnisch, Portugiesisch (Brasilien), Türkisch, Japanisch und Chinesisch (vereinfacht).
+- **Einstellungen** öffnen sich in einem normalen Windows-Fenster, die Seiten sind in Kategorien sortiert, neu ist der Modus „Reduzierte Bewegung“.
+- **Suche kann mehr:** Rechner, Umrechnen, Timer, Dateisuche, Web-Suche und ein Zwischenablage-Verlauf, alles in der eingestellten Sprache.
+- **Taskbar:** Ein Icon beim Ziehen kurz festhalten wechselt zur App. Mittelklick, Mausrad, Fenster anordnen und Stummschalten direkt auf den Icons.
+- **Neue Hintergründe** Polarlicht, Raster und Glut. Der Hintergrund kann nach Uhrzeit wechseln, braucht weniger RAM und pausiert hinter verdeckten Fenstern und im Akkubetrieb.
+- **Explorer:** Tabs lassen sich beim Ziehen wechseln. Hell und Dunkel können der Uhrzeit folgen, Einstellungen werden automatisch gesichert.
+- **Neuer Player-Look wie bei Windows:** Das Cover füllt die ganze Karte als weicher Hintergrund, Titel, Fortschrittsleiste und Knöpfe stehen mittig darauf. Im Medien-Widget steht links zusätzlich das scharfe Cover, dazu Künstler und größere Knöpfe. Die Fortschrittsleiste zeigt, wie weit der Song schon ist.
+- **Neue Erweiterung „TexttoSpeech for Windows“:** ein kompaktes Textfeld, das Text per Roboter-Stimme gleichzeitig auf den Kopfhörern und einem virtuellen Mikrofon für Voice-Chats ausgibt. Ohne Last im Leerlauf, mit eigenen Einstellungen für Stimme, Tempo, Design, Geräte und Tastenkürzel.
+- **Fehlerbehebungen:** Taskleiste auf schwachen PCs, weniger Leerlauf-Last der Leisten, das Notizen-Widget lässt sich sauber skalieren, der ^-Pfeil öffnet die versteckten Symbole wieder zuverlässig.
+- **Speichern:** Änderungen werden gesammelt und mit Wiederholung gesichert, eine gesperrte settings.json wird nie mit Standardwerten überschrieben.
+- **Setup und Start:** gehärteter Installer und Deinstaller. PopWin startet jetzt direkt beim Anmelden statt erst nach einer Weile, und die Windows-Taskleisten auf den anderen Bildschirmen blitzen dabei nicht mehr kurz auf.
+- **Vollbild bleibt oben:** Läuft schon ein Spiel oder eine App im Vollbild, wenn du PopWin startest, neu startest oder die Topbar wieder einschaltest, schiebt die Topbar es nicht mehr nach unten. Sie nimmt sich ihren Platz erst, wenn das Vollbild zu ist.
+- **Taskbar live:** Schließt du ein Programm, verschwindet es sofort aus der Taskbar, neue Fenster erscheinen genauso schnell.
+
 ## 4.0.1
 
 - Spiele wie Geometry Dash werden jetzt auch mit eingeblendeten Overlay-Programmen zuverlässig als Vollbild erkannt, sodass sie nicht mehr versehentlich verkleinert werden.

@@ -530,8 +530,123 @@ def saws(phase):
     return pixels(image, painter)
 
 
+AURORA_RANDOM = np.random.default_rng(23)
+AURORA_SKY = (np.array((4, 8, 22), np.float32) + (ROW / HEIGHT)[..., None] * np.array((6, 22, 30), np.float32)) * np.ones((1, WIDTH, 1), np.float32)
+AURORA_STARS_X = AURORA_RANDOM.integers(0, WIDTH - 1, 700)
+AURORA_STARS_Y = AURORA_RANDOM.uniform(0, HEIGHT * 0.7, 700)
+AURORA_STARS_LIGHT = AURORA_RANDOM.uniform(40, 170, 700)[:, None] * np.array((1, 1, 1.1), np.float32)
+AURORA_RIDGE = HEIGHT * 0.86 - 70 * np.abs(np.sin(TAU * 1.5 * SIDE + 0.6)) - 34 * np.sin(TAU * 4 * SIDE + 2) - 14 * np.sin(TAU * 11 * SIDE)
+AURORA_GROUND = np.clip(ROW - AURORA_RIDGE[None, :], 0, 1)[..., None]
+# Vorhang: Höhe der Unterkante, Wellen über die Breite, Schwingungen pro Schleife, Versatz, Länge der Strahlen, Helligkeit
+AURORA_BANDS = ((0.50, 1.0, 1, 0.0, 330, 1.0), (0.40, 1.6, -1, 2.1, 260, 0.75), (0.60, 0.7, 2, 4.0, 380, 0.6), (0.33, 2.3, -2, 5.2, 200, 0.5))
+AURORA_GREEN, AURORA_VIOLET = np.array((40, 255, 150), np.float32), np.array((160, 70, 255), np.float32)
+
+
+def aurora(phase):
+    """Polarlicht: Vorhänge aus Licht mit scharfer Unterkante und langen Strahlen nach oben, darunter ein dunkler Bergkamm."""
+    picture = AURORA_SKY.copy()
+    add_pixels(picture, AURORA_STARS_X, AURORA_STARS_Y, AURORA_STARS_LIGHT)
+    for base, waves_across, cycles, offset, tail, light in AURORA_BANDS:
+        edge = HEIGHT * base + 80 * np.sin(TAU * waves_across * SIDE + cycles * phase + offset) \
+            + 30 * np.sin(TAU * (waves_across * 2.6 + 1) * SIDE - cycles * phase + offset * 2)
+        above = edge[None, :] - ROW  # über der Unterkante positiv
+        glow = np.where(above > 0, np.exp(-np.maximum(above, 0) / tail), np.exp(np.minimum(above, 0) / 34))
+        # ungleichmäßige Strahlen: zwei Wellen verschiedener Breite, sonst sähe der Vorhang aus wie ein Lattenzaun
+        rays = 0.7 + 0.3 * np.sin(TAU * (7 + 3 * waves_across) * SIDE + 2 * np.sin(cycles * phase + offset) + offset) \
+            * np.sin(TAU * 2.3 * SIDE + offset * 1.7 - cycles * phase)
+        breath = 0.75 + 0.25 * np.sin(phase * abs(cycles) + offset * 3)
+        mix = np.clip(above / (tail * 1.5), 0, 1)[..., None]
+        colour = AURORA_GREEN + (AURORA_VIOLET - AURORA_GREEN) * mix
+        picture += (glow * rays[None, :] * (light * breath * 0.62))[..., None] * colour
+    return picture * (1 - AURORA_GROUND) + np.array((3, 5, 12), np.float32) * AURORA_GROUND
+
+
+GRID_HORIZON = round(HEIGHT * 0.56)
+GRID_T = np.clip((ROW - GRID_HORIZON) / (HEIGHT - GRID_HORIZON), 1e-4, 1)  # 0 am Horizont, 1 am unteren Rand
+GRID_DEPTH = 1 / GRID_T
+GRID_ACROSS = (COLUMN - (WIDTH - 1) / 2)[None, :] / (WIDTH / 2) * GRID_DEPTH * 2.6
+GRID_ACROSS_STEP = GRID_DEPTH * 2.6 / (WIDTH / 2)  # so viel ändert sich der Wert von einem Pixel zum nächsten
+GRID_DEEP_STEP = 1.15 / (GRID_T ** 2 * (HEIGHT - GRID_HORIZON))
+GRID_FLOOR = ROW >= GRID_HORIZON
+GRID_FADE = np.clip(GRID_T * 5, 0, 1) ** 0.7  # am Horizont verschwimmen die Linien im Dunst
+GRID_SUN_X, GRID_SUN_Y, GRID_SUN_R = (WIDTH - 1) / 2, GRID_HORIZON - 150, 330
+
+
+def grid_lines(value, step):
+    """Helligkeit einer Linie bei jeder ganzen Zahl, so breit gezeichnet, dass sie auch in der Ferne glatt bleibt."""
+    distance = np.abs(value - np.round(value))
+    width = 0.022 + step * 1.2
+    core = np.clip(1 - distance / width, 0, 1)
+    return core + 0.35 * np.clip(1 - distance / (width * 5), 0, 1) ** 2
+
+
+def grid_sky():
+    share = np.clip(ROW / GRID_HORIZON, 0, 1)
+    sky = np.array((14, 6, 40), np.float32) + (share ** 2.2)[..., None] * np.array((150, 24, 96), np.float32) * np.ones((1, WIDTH, 1), np.float32)
+    distance = np.hypot(COLUMN[None, :] - GRID_SUN_X, ROW - GRID_SUN_Y)
+    height = np.clip((ROW - (GRID_SUN_Y - GRID_SUN_R)) / (2 * GRID_SUN_R), 0, 1)
+    sun = np.array((255, 226, 90), np.float32) + height[..., None] * np.array((0, -170, 80), np.float32)
+    bars = (((ROW - GRID_SUN_Y) / 30) % 1 < 0.34 + 0.3 * height) & (ROW > GRID_SUN_Y + 20)  # nach unten breitere Lücken
+    disc = (np.clip(GRID_SUN_R - distance, 0, 1) * ~bars)[..., None]
+    halo = (np.exp(-np.maximum(distance - GRID_SUN_R, 0) / 190) * 0.42)[..., None] * np.array((255, 70, 150), np.float32)
+    return (sky + halo) * (1 - disc) + sun * disc
+
+
+GRID_SKY = None
+
+
+def grid(phase):
+    """Raster: Ein leuchtendes Gitter läuft auf eine tief stehende Sonne zu. Pro Schleife ziehen genau 16 Felder vorbei."""
+    global GRID_SKY
+    if GRID_SKY is None:
+        GRID_SKY = grid_sky()
+    light = np.maximum(grid_lines(GRID_DEPTH * 1.15 + 16 * phase / TAU, GRID_DEEP_STEP) * np.ones((1, WIDTH), np.float32),
+                       grid_lines(GRID_ACROSS, GRID_ACROSS_STEP)) * GRID_FADE
+    pulse = 0.85 + 0.15 * np.sin(2 * phase)
+    floor = np.array((10, 4, 30), np.float32) + (np.clip(light, 0, 1.35) * pulse)[..., None] * np.array((255, 70, 215), np.float32) \
+        + (np.clip(light - 0.75, 0, 1) * 1.6)[..., None] * np.array((0, 150, 40), np.float32)
+    return np.where(GRID_FLOOR[..., None], floor, GRID_SKY)
+
+
+EMBER_RANDOM = np.random.default_rng(31)
+EMBER_COUNT = 150  # auf der linken Hälfte, die rechte ist ihr Spiegelbild
+EMBER_X = EMBER_RANDOM.uniform(-40, HALF + 40, EMBER_COUNT)
+EMBER_START = EMBER_RANDOM.uniform(0, 1, EMBER_COUNT)
+EMBER_CYCLES = EMBER_RANDOM.integers(1, 4, EMBER_COUNT)
+EMBER_SIZE = 3 + EMBER_RANDOM.exponential(9, EMBER_COUNT).clip(0, 46)
+EMBER_SWAY = EMBER_RANDOM.uniform(20, 110, EMBER_COUNT)
+EMBER_SWAY_CYCLES = EMBER_RANDOM.integers(1, 4, EMBER_COUNT) * EMBER_RANDOM.choice((-1, 1), EMBER_COUNT)
+EMBER_OFFSET = EMBER_RANDOM.uniform(0, TAU, EMBER_COUNT)
+EMBER_HEAT = EMBER_RANDOM.uniform(0, 1, EMBER_COUNT)
+EMBER_BACK = (np.array((9, 5, 12), np.float32) + ((ROW / HEIGHT) ** 2.4)[..., None] * np.array((92, 26, 6), np.float32)) * np.ones((1, HALF, 1), np.float32)
+EMBER_FLOOR = ((ROW / HEIGHT) ** 5)[..., None] * np.array((120, 44, 8), np.float32) * np.ones((1, HALF, 1), np.float32)
+
+
+def embers(phase):
+    """Glut: Funken steigen langsam auf, kleine scharf und hell, große unscharf und blass wie durch ein Objektiv."""
+    half = EMBER_BACK + EMBER_FLOOR * (0.5 + 0.5 * np.sin(phase * 2))
+    life = (EMBER_START + EMBER_CYCLES * phase / TAU) % 1
+    for index in range(EMBER_COUNT):
+        size = EMBER_SIZE[index]
+        x = EMBER_X[index] + EMBER_SWAY[index] * np.sin(EMBER_SWAY_CYCLES[index] * phase + EMBER_OFFSET[index])
+        y = HEIGHT + 60 - life[index] * (HEIGHT + 120)
+        reach = int(size * 2.6) + 2
+        left, right = max(0, int(x) - reach), min(HALF, int(x) + reach + 1)
+        top, bottom = max(0, int(y) - reach), min(HEIGHT, int(y) + reach + 1)
+        if left >= right or top >= bottom:
+            continue
+        spot = np.exp(-((np.arange(left, right, dtype=np.float32)[None, :] - x) ** 2
+                        + (np.arange(top, bottom, dtype=np.float32)[:, None] - y) ** 2) / (size * size))
+        fade = np.sin(np.pi * life[index]) ** 0.6 * (0.6 + 0.4 * np.sin(3 * EMBER_CYCLES[index] * phase + EMBER_OFFSET[index] * 5))
+        strength = fade * min(1.0, 7.0 / size) * 1.25  # große Funken sind unscharf, also blasser
+        colour = np.array((255, 120 + 90 * EMBER_HEAT[index], 30 + 90 * EMBER_HEAT[index] ** 3), np.float32)
+        half[top:bottom, left:right] += (spot * strength)[..., None] * colour
+    return np.hstack((half, half[:, ::-1]))
+
+
 LOOP_FRAMES = {"galaxie": FPS * 30, "gipfel": FPS * 30}  # eine Vierteldrehung darf ruhig länger dauern
-SCENES = {"galaxie": galaxy, "linien": lines, "wellen": waves, "waben": honeycomb, "kristall": crystal, "sterne": stars, "scherben": shards, "gipfel": summits, "dash": dash, "saegen": saws, "null": moon}
+SCENES = {"galaxie": galaxy, "linien": lines, "wellen": waves, "waben": honeycomb, "kristall": crystal, "sterne": stars, "scherben": shards, "gipfel": summits, "dash": dash, "saegen": saws, "null": moon,
+          "polarlicht": aurora, "raster": grid, "glut": embers}
 
 
 def ffmpeg_path() -> str:

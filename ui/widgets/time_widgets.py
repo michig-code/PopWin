@@ -47,7 +47,7 @@ class DateWidget(DeskletWindow):
 
     def _tick(self) -> None:
         today = QDate.currentDate()
-        locale = QLocale.system()
+        locale = QLocale()  # die eingestellte App-Sprache, nicht die Windows-Sprache
         self.weekday.setText(locale.toString(today, "dddd"))
         self.day.setText(str(today.day()))
         self.month.setText(locale.toString(today, "MMMM yyyy"))

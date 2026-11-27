@@ -20,6 +20,8 @@ STATUS = {"wait": "wartet", "run": "läuft …", "ok": "fertig", "fail": "fehlge
 class CenteredPanel(PopupPanel):
     """Popup in der Bildschirmmitte, das nicht beim ersten Fokusverlust verschwindet."""
     STAYS = True
+    ANIM_SCALE = 0.8
+    ANIM_MAX_REDUCED = 80
 
     def event(self, event) -> bool:
         return QWidget.event(self, event) if self.STAYS else super().event(event)
@@ -198,7 +200,7 @@ class TaskPanel(ThemedWindow):
                  | Qt.WindowType.NoDropShadowWindowHint)
         super().__init__(ctx, flags)
         self.controller = controller
-        self.animator = WindowAnimator(ctx, self)
+        self.animator = WindowAnimator(ctx, self, scale=0.8, max_reduced=80)
         self.setFixedWidth(self.WIDTH)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)

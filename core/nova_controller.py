@@ -1,7 +1,8 @@
-"""Nova als Teil von PopWin: Sie läuft im selben Programm und braucht nichts außer dem API-Key.
+"""Steuerung des nativ in PopWin integrierten Nova-Chats.
 
-Das frühere Nova war ein eigener Prozess mit Python-Umgebung, WebView2 und Audio-Bausteinen. Fehlte eines davon, passierte
-beim Start nichts, und ohne Key blieb das Fenster für die Eingabe versteckt. Jetzt zeigt der Chat selbst, was fehlt.
+Nova läuft direkt im selben Prozess als nativer PySide6-Bestandteil von PopWin
+und benötigt außer dem Gemini-API-Key keine externen Laufzeitkomponenten;
+fehlt der Key, weist der Chat direkt darauf hin.
 """
 from __future__ import annotations
 
@@ -539,14 +540,14 @@ class NovaController(QObject):
         return self.toolbox.connections
 
     def start(self) -> None:
-        """Beim Start von PopWin: Überwachungen laufen lassen; der Dev-Build bringt sein OVH-Beispiel mit."""
+        """Beim Start von PopWin: optionale Erweiterungen initialisieren und Überwachungen starten."""
         from core.dev import is_dev
         if is_dev():
             import importlib
-            try:  # über importlib, damit PyInstaller devtools nie einpackt
-                importlib.import_module("devtools.nova_seed").seed(self)
+            try:  # über importlib, damit PyInstaller den privaten Ordner nie einpackt
+                importlib.import_module("_private.devmenu.nova_seed").seed(self)
             except Exception as exc:
-                log.warning("Dev-Beispiele für Nova nicht angelegt: %s", exc)
+                log.warning("Optionale Nova-Beispiele nicht angelegt: %s", exc)
         self.watcher.start()
 
     def use_artifacts(self, store: ArtifactStore) -> None:

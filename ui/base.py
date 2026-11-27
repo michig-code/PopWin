@@ -82,6 +82,8 @@ class G:
     SEND = "\ue724"
     STOP = "\ue71a"
     ANIMATION = ""
+    WALLPAPER = "\uE91B"
+    DEV = "\uEC7A"
 
 
 def resettable(editor: QWidget, reset) -> QWidget:
@@ -142,6 +144,7 @@ def glyph_icon(glyph: str, size: int, color: str) -> QIcon:
     return QIcon(pixmap)
 
 
+MAX_ICON_CACHE = 256
 _icon_cache: dict[str, QIcon] = {}
 
 
@@ -149,7 +152,7 @@ def icon_for_target(target: str) -> QIcon:
     """Icon einer .exe, einer Verknüpfung oder eines Befehls; leer, wenn es keine Datei gibt."""
     if target in _icon_cache:
         return _icon_cache[target]
-    # --- [Antigravity Start] Icons für interne PopWin-Pins (z. B. popwin:dev) ---
+    # --- [Antigravity Start] Icons für interne PopWin-Pins (z. B. popwin:settings) ---
     if target.startswith("popwin:"):
         from core.replacements import app_icon
         app_name = target.removeprefix("popwin:")
@@ -172,6 +175,8 @@ def icon_for_target(target: str) -> QIcon:
                 icon = _take_icon(win_api.file_hicon(target))  # Installer-Icons kann Qt nicht immer lesen, Windows schon
         else:
             icon = _take_icon(win_api.file_hicon(path)) if path else QIcon()
+    if len(_icon_cache) >= MAX_ICON_CACHE:
+        _icon_cache.pop(next(iter(_icon_cache)))
     _icon_cache[target] = icon
     return icon
 
@@ -224,10 +229,13 @@ class ThemedWindow(QWidget):
                 if child.objectName() in self.THEMED_CHILDREN:
                     child.setProperty("popMode", theme.mode)
             self.setStyleSheet(sheet)  # stylt auch bei gleichem Text neu, das braucht der Wechsel von Hell/Dunkel
-        meta = theme.meta(self.theme_name)
+        self._apply_window_effects(theme.meta(self.theme_name))
+
+    def _apply_window_effects(self, meta: dict) -> None:
+        """Eigene Fensterrahmen (window_frame.NativeWindow) überschreiben das."""
         hwnd = int(self.winId())
         if self.native_backdrop():
-            win_api.set_blur(hwnd, meta["blur"], theme.tint(self.theme_name))
+            win_api.set_blur(hwnd, meta["blur"], self.ctx.theme.tint(self.theme_name))
             win_api.set_rounded(hwnd, meta["rounded"] == "1")
         else:  # die Fläche malt Qt selbst mit den runden Ecken aus dem Stil
             win_api.set_blur(hwnd, "none")
@@ -361,16 +369,18 @@ class BarWindow(ThemedWindow):
         self._revealed = True
         self._hide_at = 0.0
         self._hot_since: float | None = None
-        self._edge_timer = QTimer(self, interval=70)
+        self._edge_timer = QTimer(self, interval=100)
         self._edge_timer.timeout.connect(self._watch_edge)
-        self.animator = WindowAnimator(ctx, self, self._shift)
+        self.animator = WindowAnimator(ctx, self, self._shift, scale=0.9, max_reduced=80)
         self._reposition_timer = QTimer(self, singleShot=True, interval=120)
         self._reposition_timer.timeout.connect(self.reposition)
         self._fullscreen = False
         self._peek_until = 0.0
         self._on_top = True
-        self._fullscreen_timer = QTimer(self, interval=700)
+        self._fullscreen_timer = QTimer(self, interval=1000)
         self._fullscreen_timer.timeout.connect(self._check_fullscreen)
+        self._edge_level_cache = self.option("edge_level")
+        ctx.config.changed.connect(self._on_bar_config)
         self._watching = False  # hört auf Fokuswechsel
         self._reposition_later = False  # im Vollbild aufgeschoben: jede Platzänderung schrumpft sonst das Spiel
 
@@ -392,6 +402,10 @@ class BarWindow(ThemedWindow):
     def option(self, field: str):
         """Wert aus dem Profil dieses Monitors - im Sync-Modus also dem gemeinsamen."""
         return self.ctx.config.monitor(self.screen_id)[field]
+
+    def _on_bar_config(self, key: str) -> None:
+        if key == "profile":
+            self._edge_level_cache = self.option("edge_level")
 
     def _shift(self, offset: int) -> None:
         self.slide_offset = offset
@@ -439,6 +453,7 @@ class BarWindow(ThemedWindow):
         self._revealed = True
         self.show()
         win_api.set_zorder(int(self.winId()), win_api.HWND_TOPMOST)
+        self._on_top = True
         self._fade_in()
         action()
 
@@ -457,7 +472,7 @@ class BarWindow(ThemedWindow):
         ratio = self.bar_screen.devicePixelRatio()
         x = screen.x() + round((cursor.x() - screen.x()) * ratio)
         y = screen.y() + round((cursor.y() - screen.y()) * ratio)
-        level = self.option("edge_level")
+        level = self._edge_level_cache
         hot = in_hot_zone(x, y, native_rect(self.bar_screen), self.edge, round(EDGE_LEVELS.get(level, EDGE_LEVELS[3])[0] * ratio))
         busy = self.frameGeometry().contains(cursor) or self._keeps_open()
         now = time.monotonic()
@@ -468,6 +483,7 @@ class BarWindow(ThemedWindow):
                 self._revealed = True
                 self.show()
                 win_api.set_zorder(int(self.winId()), win_api.HWND_TOPMOST)
+                self._on_top = True
                 self._fade_in()
         elif self._revealed and now >= self._hide_at:
             self._revealed = False
@@ -483,20 +499,34 @@ class BarWindow(ThemedWindow):
         # Läuft beim Start schon ein Spiel, darf die Leiste ihm keinen Platz wegnehmen - noch vor dem ersten Platzieren prüfen.
         self._fullscreen = win_api.fullscreen_on(native_rect(self.bar_screen))
         self.reposition()
-        self._fullscreen_timer.start()
+        if not (hasattr(self.ctx, "_bar_sync_timer") and self.ctx._bar_sync_timer.isActive()):
+            self._fullscreen_timer.start()
         if not self._watching:
             self._watching = True
             ForegroundWatch.get().changed.connect(self._on_foreground)
 
-    def _check_fullscreen(self) -> None:
-        # Eigene Prüfung statt ABN_FULLSCREENAPP: Das Signal unterscheidet Monitore nicht zuverlässig,
-        # und ein Spiel auf Monitor 1 soll die Leisten auf Monitor 2 nicht wegnehmen.
+    def ensure_on_top(self) -> None:
+        if self._on_top and self._registered and self.isVisible() and not win_api.is_topmost(int(self.winId())):
+            win_api.set_zorder(int(self.winId()), win_api.HWND_TOPMOST)
+
+    def apply_fullscreen_state(self, fullscreen: bool) -> None:
+        """Vom gemeinsamen Leisten-Timer in main.py (ein EnumWindows für alle Monitore) oder von _check_fullscreen."""
         self._enforce_placement()
-        self._fullscreen = win_api.fullscreen_on(native_rect(self.bar_screen))
+        self._fullscreen = fullscreen
         self._place_in_z()
+        if self._on_top and self._registered and self.isVisible():
+            self.ensure_on_top()
         if not self._fullscreen and self._reposition_later:
             self._reposition_later = False
             self.reposition()
+
+    def _check_fullscreen(self, fresh: bool = False) -> None:
+        # Eigene Prüfung statt ABN_FULLSCREENAPP: Das Signal unterscheidet Monitore nicht zuverlässig,
+        # und ein Spiel auf Monitor 1 soll die Leisten auf Monitor 2 nicht wegnehmen.
+        monitor = native_rect(self.bar_screen)
+        # Topbar und Taskbar desselben Monitors fragen dasselbe: Der regelmäßige Blick teilt sich eine Antwort.
+        shared = None if fresh else getattr(self.ctx, "fullscreen_on", None)
+        self.apply_fullscreen_state(shared(monitor) if shared else win_api.fullscreen_on(monitor))
 
     def _on_foreground(self, hwnd: int) -> None:
         """Ein anderes Programm hat den Fokus. Ist es das Vollbild auf diesem Monitor, gibt die Leiste sofort frei,
@@ -506,7 +536,7 @@ class BarWindow(ThemedWindow):
         if hwnd and win_api.fullscreen_window_on(hwnd, native_rect(self.bar_screen)):
             self.release_to_game()
             return
-        self._check_fullscreen()
+        self._check_fullscreen(fresh=True)
 
     def release_if_game_in_front(self) -> None:
         """Ein Menü hat den Fokus abgegeben. Ging er ans Spiel, verschwindet die Leiste im selben Moment wie das Menü."""
@@ -579,6 +609,8 @@ class BarWindow(ThemedWindow):
 
     def undock(self) -> None:
         self._fullscreen_timer.stop()
+        self._edge_timer.stop()
+        self._reposition_timer.stop()
         if self._watching:
             self._watching = False
             ForegroundWatch.get().changed.disconnect(self._on_foreground)
@@ -590,7 +622,8 @@ class BarWindow(ThemedWindow):
     def reposition(self) -> None:
         if not self._registered:
             return
-        if self._fullscreen:
+        hold = self._fullscreen or self._game_behind()
+        if hold:
             # Ändert sich hier der reservierte Platz, passt Windows alle maximierten Fenster neu ein -
             # auch Spiele und Videos, die sich als maximiert melden (Valorant, Discord). Sie rutschten unter die Topbar.
             # Das gilt auch beim Start von PopWin: Dann steht die Leiste schon da, nimmt sich ihren Platz aber erst nach dem Spiel.
@@ -605,7 +638,7 @@ class BarWindow(ThemedWindow):
         # Der Abstand gilt auf beiden Seiten: zum Bildschirmrand und zu den Fenstern.
         # Ohne Reservierung gehen Fenster bis zum Rand und die Leiste schwebt darüber.
         thickness = size + 2 * margin if self.reserves_space() else 0
-        if self._fullscreen:
+        if hold:
             left, top, right, bottom = monitor  # an den Rand stellen, ohne Platz zu nehmen
         else:
             rect = win_api.appbar_set_pos(hwnd, self.edge, monitor, thickness, self._rect)
@@ -621,6 +654,11 @@ class BarWindow(ThemedWindow):
         y = top + margin if self.edge == "top" else bottom - size - margin
         self._area = (left + margin, right - margin, y, size)
         self.apply_geometry()
+
+    def _game_behind(self) -> bool:
+        """Vor dem ersten Platznehmen (Start, Neustart, Leiste wieder eingeschaltet): Liegt auf dem Monitor ein Vollbild,
+        auch verdeckt oder während ein PopWin-Fenster den Fokus hat, wartet die Leiste, bis es zu ist."""
+        return self._rect is None and self.reserves_space() and win_api.fullscreen_present(native_rect(self.bar_screen))
 
     def reserves_space(self) -> bool:
         return not self.auto_hides()
@@ -654,7 +692,9 @@ class BarWindow(ThemedWindow):
         if not self._placed or self.animator.running or not self.isVisible():
             return
         x, y, width, height = self._placed
-        if win_api.window_rect(int(self.winId())) != (x, y, x + width, y + height):
+        actual = win_api.window_rect(int(self.winId()))
+        expected = (x, y, x + width, y + height)
+        if any(abs(a - b) > 1 for a, b in zip(actual, expected)):
             win_api.place_window(int(self.winId()), x, y, width, height)
         # --- [Antigravity Start] Qt-Fenstergröße mit nativer Platzierung synchron halten ---
         ratio = self.bar_screen.devicePixelRatio()
@@ -740,12 +780,20 @@ class PopupPanel(ThemedWindow):
 
     WINDOW_KIND = Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
     CENTERED = False  # waagerecht in der Bildschirmmitte statt am Knopf
+    ANIM_SCALE = 0.85
+    ANIM_MAX_REDUCED = 80
+    ANIM_MAX_DURATION = 0
     _open_panel: "PopupPanel | None" = None  # die Leisten nehmen keinen Fokus, Klicks dort schließen sonst nichts
 
     def __init__(self, ctx, theme_name: str = "", shift=None):
         flags = self.WINDOW_KIND | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
         super().__init__(ctx, flags, theme_name)
-        self.animator = WindowAnimator(ctx, self, shift)
+        self.animator = WindowAnimator(
+            ctx, self, shift,
+            scale=self.ANIM_SCALE,
+            max_reduced=self.ANIM_MAX_REDUCED,
+            max_duration=self.ANIM_MAX_DURATION,
+        )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)

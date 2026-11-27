@@ -4,6 +4,7 @@ from __future__ import annotations
 import getpass
 import os
 import subprocess
+import time
 
 from PySide6.QtCore import QDateTime, QEasingCurve, QEvent, QLocale, QPoint, QPropertyAnimation, Qt, QTimer
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider,
@@ -72,6 +73,8 @@ TOP_ITEMS = {
 # Diese Symbole gibt es nur, wenn der PC das Passende hat
 TOP_NEEDS = {"mic": "microphone", "bluetooth": "bluetooth", "battery": "battery", "volume": "speakers"}
 LOW_BATTERY = 20
+TRAY_WAIT_TICKS = 160   # 25 ms-Takte bis der Überlauf erscheint (erster UIA-Aufruf kann dauern)
+TRAY_PLACE_TICKS = 48   # ab dem Erscheinen nachfassen, solange der Explorer animiert
 
 
 def complete_order(order: list[str]) -> list[str]:
@@ -326,6 +329,13 @@ class TopBar(BarWindow):
 
         self.chevron = IconButton(G.CHEVRON_UP, "Versteckte Symbole")
         self._tray_was_open = False
+        self._tray_open_on_enter = False
+        self._tray_pressed_at = 0.0
+        self._tray_place_timer = QTimer(self, interval=25)
+        self._tray_place_timer.timeout.connect(self._place_tray_step)
+        self._tray_place_ticks = 0
+        self._tray_placed_once = False
+        self.chevron.installEventFilter(self)
         self.chevron.pressed.connect(self._remember_tray)
         self.chevron.clicked.connect(self._toggle_tray)
         self.cloud = IconButton(G.CLOUD, "Cloud-Synchronisierung")
@@ -478,6 +488,12 @@ class TopBar(BarWindow):
         animation.start()
 
     def eventFilter(self, watched, event) -> bool:
+        if watched is self.chevron:
+            # Tray-^-Fix (3.9): Zustand beim Hineinfahren merken, gegen das Light-Dismiss-Rennen.
+            if event.type() == QEvent.Type.Enter:
+                self._tray_open_on_enter = bool(win_api.tray_overflow_window())
+            elif event.type() == QEvent.Type.Leave:
+                self._tray_open_on_enter = False
         key = self._item_key(watched)
         if not key:
             return super().eventFilter(watched, event)
@@ -713,29 +729,59 @@ class TopBar(BarWindow):
         self.quick.setToolTip(f"Fokus: noch {format_remaining(focus.remaining)}" if focus.active
                               else "Schnelleinstellungen")
 
+    def _keeps_open(self) -> bool:
+        return super()._keeps_open() or bool(win_api.tray_overflow_window())
+
+    def undock(self) -> None:
+        self.timer.stop()
+        self._tray_place_timer.stop()
+        super().undock()
+
     def _remember_tray(self) -> None:
         # Muss beim Drücken feststehen: Windows schließt das Fenster oft schon vor dem Loslassen.
-        self._tray_was_open = bool(win_api.tray_overflow_window())
+        self._tray_pressed_at = time.monotonic()
+        self._tray_was_open = bool(win_api.tray_overflow_window()) or self._tray_open_on_enter
+        self._tray_open_on_enter = False
 
     def _toggle_tray(self) -> None:
-        if self._tray_was_open:
+        was_open = self._tray_was_open or (time.monotonic() - self._tray_pressed_at > 0.5 and bool(win_api.tray_overflow_window()))
+        self._tray_was_open = False
+        self._tray_open_on_enter = False
+        if was_open:
             # Nie erneut öffnen: Enter würde sonst das markierte Tray-Symbol auslösen.
+            self._tray_place_timer.stop()
             if win_api.tray_overflow_window():
                 win_api.close_tray_overflow()
             return
-        QTimer.singleShot(0, win_api.open_tray_overflow)
-        self._place_tray(0)
+        win_api.open_tray_overflow_async()
+        self._tray_place_ticks = 0
+        self._tray_placed_once = False
+        self._tray_place_timer.start()
+        self._place_tray_step()
 
-    def _place_tray(self, tick: int) -> None:
+    def _place_tray(self, tick: int = 0) -> None:
+        self._tray_place_ticks = tick
+        self._tray_placed_once = False
+        self._tray_place_timer.start()
+        self._place_tray_step()
+
+    def _place_tray_step(self) -> None:
         """Windows öffnet den Überlauf an der ausgeblendeten Taskleiste - wir holen ihn unter den Pfeil.
 
         Mehrfach, weil Explorer die Position während der Einblend-Animation noch einmal setzt.
         """
         hwnd = win_api.tray_overflow_window()
         if hwnd:
+            if not self._tray_placed_once:
+                self._tray_placed_once = True
+                self._tray_place_ticks = 0  # erst ab dem Erscheinen zählen
             win_api.move_window(hwnd, *self._tray_position(hwnd))
-        if tick < 40:
-            QTimer.singleShot(20, lambda: self._place_tray(tick + 1))
+        elif self._tray_placed_once:
+            self._tray_place_timer.stop()
+            return
+        self._tray_place_ticks += 1
+        if self._tray_place_ticks >= (TRAY_PLACE_TICKS if self._tray_placed_once else TRAY_WAIT_TICKS):
+            self._tray_place_timer.stop()
 
     def _tray_position(self, hwnd: int) -> tuple[int, int]:
         left, top, right, bottom = win_api.window_rect(hwnd)
@@ -746,9 +792,15 @@ class TopBar(BarWindow):
         monitor = native_rect(screen)
         x = max(monitor[0] + 4, min(anchor_x - width, monitor[2] - width - 4))
         if self.edge == "top":
-            return x, anchor_y + 8
-        chevron_top = self.chevron.mapToGlobal(self.chevron.rect().topLeft())
-        return x, native_point(screen, chevron_top.x(), chevron_top.y())[1] - height - 8
+            y = anchor_y - self.slide_offset + 8
+        else:
+            chevron_top = self.chevron.mapToGlobal(self.chevron.rect().topLeft())
+            chevron_top_y = native_point(screen, chevron_top.x(), chevron_top.y())[1]
+            y = chevron_top_y - self.slide_offset - height - 8
+        top_limit = monitor[1] + 4
+        bottom_limit = max(top_limit, monitor[3] - height - 4)
+        y = max(top_limit, min(y, bottom_limit))
+        return x, y
 
     def _open_cloud(self) -> None:
         folder = os.environ.get("OneDrive")

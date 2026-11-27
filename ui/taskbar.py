@@ -4,8 +4,10 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from pathlib import Path
 
+import shiboken6
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPainter, QPainterPath, QPixmap, QRegion
 from PySide6.QtWidgets import (
@@ -17,10 +19,12 @@ from core.monitor_manager import native_rect
 from ui.animation import duration_of
 from core.notifications import badge_count, badge_text, notice_labels, visible_notices
 from core.replacements import launch, taskbar_slot
-from core.dev import is_dev
-from ui.claude_button import ClaudeButton, is_claude_window
+from core.window_tiles import MAXIMIZE, TILES, next_window
+from core.dev import dev_label, is_claude_window, is_dev, make_claude_button
+from ui.animation import animation_duration
 from ui.clock_place import ClockFace, ClockPill
 from ui.dock_tools import TOOL_ITEMS, ToolRow
+from ui.drag_switch import DragHover
 from ui import sidebar  # [Antigravity]
 from ui.base import BarWindow, G, IconButton, NovaButton, glyph_icon, icon_for_target, in_hot_zone, set_prop, themed_menu  # noqa: F401
 
@@ -134,48 +138,130 @@ def shows_all_windows(window_filter: str, primary: bool) -> bool:
     return window_filter == "all"
 
 
+def task_state(groups: dict, foreground: int, is_minimized, notices: list, options: tuple) -> tuple:
+    """Alles, wovon das Aussehen der Task-Icons abhängt, als vergleichbarer Wert: Fenster samt Titel und Zustand,
+    das aktive Fenster, Benachrichtigungen und die Anzeige-Optionen."""
+    tasks = tuple((key, group["target"], group["name"],
+                   tuple((w.hwnd, w.title, bool(is_minimized(w.hwnd))) for w in group["windows"]))
+                  for key, group in groups.items())
+    return tasks, foreground, tuple(notices), options
+
+
 MEDIA_WIDTHS = {"controls": 118, "cover": 88}  # die anderen Stile nehmen die eingestellte Breite
 SEARCH_WIDTHS = {"pill": 96, "field": 170, "wide": 260}
 GLIDE_MS = 170  # wie schnell die Icons Platz machen
 SHARED_ORDER = "alle"  # Eintrag in taskbar.order, wenn die Icons synchron sind
 UNLIMITED_WIDTH = 16777215  # Qts QWIDGETSIZE_MAX, in PySide nicht verfügbar
 LOGO = Path(__file__).resolve().parent.parent / "assets" / "popwin.png"
+MAX_WINDOW_ICON_CACHE = 128
+WINDOW_ICON_TTL_S = 15.0  # Programme ändern ihr Fenstersymbol (Badges in Teams/Discord) - ab und zu neu lesen
+# Schlüssel (hwnd, pid): Windows vergibt alte HWNDs neu, dann darf nicht das Symbol des alten Fensters erscheinen.
+_window_icon_cache: dict[tuple[int, int], tuple[QIcon, float]] = {}
+
+
+def media_progress(position: float, duration: float, playing: bool, elapsed: float) -> float:
+    """Anteil 0..1 des Songs. Windows meldet die Stelle nur ab und zu, dazwischen läuft sie hier weiter."""
+    if duration <= 0:
+        return 0.0
+    now = position + (elapsed if playing else 0.0)
+    return max(0.0, min(1.0, now / duration))
+
+
+def cover_crop(width: int, height: int, box_width: int, box_height: int) -> tuple[int, int, int, int]:
+    """Ausschnitt eines Bildes, der die Box ganz füllt (mittig, nichts verzerrt): x, y, Breite, Höhe."""
+    if width <= 0 or height <= 0 or box_width <= 0 or box_height <= 0:
+        return 0, 0, max(0, width), max(0, height)
+    scale = max(box_width / width, box_height / height)
+    w, h = min(width, round(box_width / scale)), min(height, round(box_height / scale))
+    return (width - w) // 2, (height - h) // 2, w, h
+
+
+CARD_STYLE = """
+#MediaBox[card="true"] #IconButton { font-size: 10px; padding: 0px 4px; background: transparent; border: none; }
+#MediaBox[card="true"][tall="true"] #IconButton { font-size: 15px; padding: 2px 8px; }
+#MediaBox[card="true"] #MediaTitle { font-size: 11px; }
+#MediaBox[card="true"][tall="true"] #MediaTitle { font-size: 13px; }
+#MediaBox[card="true"] #MediaArtist { font-size: 10px; }
+#MediaBox[card="true"][tall="true"] #MediaArtist { font-size: 11px; }
+"""
+CARD_RADIUS = 10
+TASKBAR_LINE_INSET = 22  # so weit ist die Fortschrittslinie in der Taskbar links und rechts eingerückt
+CARD_SHADE = {"dark": QColor(0, 0, 0, 140), "light": QColor(255, 255, 255, 165)}  # damit die Schrift auf dem Cover lesbar bleibt
+PROGRESS_MS = 1000
+CARD_COVER = 76  # scharfes Cover links im Medien-Widget
+
+
+def rounded_pixmap(pixmap: QPixmap, radius: float) -> QPixmap:
+    result = QPixmap(pixmap.size())
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(result.rect()), radius, radius)
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, pixmap)
+    painter.end()
+    return result
+
+
+class MediaProgress(QWidget):
+    """Dünne Linie: wie weit der Song schon ist."""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.value = 0.0
+        self.light = False
+        self.setFixedHeight(3)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def set_value(self, value: float) -> None:
+        if abs(value - self.value) > 0.001:
+            self.value = value
+            self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        base = 0 if self.light else 255
+        rect = QRectF(self.rect())
+        painter.setBrush(QColor(base, base, base, 60))
+        painter.drawRoundedRect(rect, 1.5, 1.5)
+        painter.setBrush(QColor(base, base, base, 220))
+        painter.drawRoundedRect(QRectF(0, 0, rect.width() * self.value, rect.height()), 1.5, 1.5)
 
 
 class MediaBox(QWidget):
-    """Now Playing - wird auch vom Desktop-Widget genutzt."""
+    """Now Playing - wird auch vom Desktop-Widget genutzt. Im Stil "full" eine Karte wie in Windows:
+    das Cover füllt den Hintergrund, Titel, Fortschritt und Knöpfe stehen mittig darauf."""
 
-    def __init__(self, ctx, compact: bool = False, width: int = 250):
+    def __init__(self, ctx, compact: bool = False, width: int = 250, tall: bool = False):
         super().__init__(objectName="MediaBox")
         self.ctx = ctx
+        self.tall = tall  # im Desktop-Widget ist Platz für Künstler und größere Knöpfe
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.setStyleSheet(CARD_STYLE)
+        set_prop(self, "tall", tall)
         self.setFixedWidth(width)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(4, 2, 4, 2)
-        row.setSpacing(6)
-        self.thumb = QLabel()
-        text = QVBoxLayout()
-        text.setSpacing(0)
-        text.setContentsMargins(0, 0, 0, 0)
-        self.title = QLabel(objectName="MediaTitle")
-        self.artist = QLabel(objectName="MediaArtist")
-        text.addStretch(1)
-        text.addWidget(self.title)
-        text.addWidget(self.artist)
-        text.addStretch(1)
-        self.prev = IconButton(G.PREV, "Zurück")
-        self.play = IconButton(G.PLAY, "Wiedergabe/Pause")
-        self.next = IconButton(G.NEXT, "Weiter")
+        self.thumb = QLabel(self)  # alle mit Eltern, sonst blitzen sie beim Umbau als eigenes Fenster auf
+        self.title = QLabel(self, objectName="MediaTitle")
+        self.artist = QLabel(self, objectName="MediaArtist")
+        self.progress = MediaProgress(self)
+        self.prev = IconButton(G.PREV, "Zurück", self)
+        self.play = IconButton(G.PLAY, "Wiedergabe/Pause", self)
+        self.next = IconButton(G.NEXT, "Weiter", self)
         self.prev.clicked.connect(ctx.media.previous)
         self.play.clicked.connect(ctx.media.play_pause)
         self.next.clicked.connect(ctx.media.next)
-        row.addWidget(self.thumb)
-        row.addLayout(text, 1)
-        row.addWidget(self.prev)
-        row.addWidget(self.play)
-        row.addWidget(self.next)
         self._thumb_data = None
+        self._cover = QPixmap()  # ganzes Cover, für den Kartenhintergrund
+        self._background = QPixmap()
         self._last = None
+        self._position = (0.0, 0.0, False, 0.0)  # Stelle, Länge, läuft, seit wann (monotonic)
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(PROGRESS_MS)
+        self._ticker.timeout.connect(self._tick)
+        self.card = None
         self.allowed = True
         self.style_name = "full"
         self.full_width = width
@@ -193,42 +279,157 @@ class MediaBox(QWidget):
         self.full_width = width
         self._apply_style()
 
+    def _arrange(self, card: bool) -> None:
+        """Karte (alles mittig untereinander) oder Zeile (Cover, Text, Knöpfe nebeneinander)."""
+        if card == self.card:
+            return
+        self.card = card
+        set_prop(self, "card", card)
+        if self.layout() is not None:
+            shiboken6.delete(self.layout())  # alte Anordnung wegwerfen; die Knöpfe und Texte bleiben Kinder der Box
+        center = Qt.AlignmentFlag.AlignHCenter
+        for label in (self.title, self.artist):
+            label.setAlignment(center if card else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if card:
+            if self.tall:  # im Widget steht links das scharfe Cover, rechts daneben alles Übrige
+                outer = QHBoxLayout(self)
+                outer.setContentsMargins(8, 8, 8, 8)
+                outer.setSpacing(10)
+                outer.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignVCenter)
+                column = QVBoxLayout()
+                outer.addLayout(column, 1)
+                column.setContentsMargins(0, 0, 0, 0)
+            else:
+                column = QVBoxLayout(self)
+                column.setContentsMargins(10, 3, 10, 2)
+            column.setSpacing(3 if self.tall else 0)  # in der Leiste feste Abstände, sonst wird sie höher
+            column.addStretch(1)
+            column.addWidget(self.title)
+            column.addWidget(self.artist)
+            column.addSpacing(4)
+            line = QHBoxLayout()  # in der Leiste etwas eingerückt, damit sie nicht an den Rand stößt
+            inset = 0 if self.tall else TASKBAR_LINE_INSET
+            line.setContentsMargins(inset, 0, inset, 0)
+            line.addWidget(self.progress)
+            column.addLayout(line)
+            self.progress.setFixedHeight(3 if self.tall else 2)
+            column.addSpacing(2 if self.tall else 4)
+            buttons = QHBoxLayout()
+            buttons.setSpacing(6 if self.tall else 8)
+            buttons.addStretch(1)
+            for button in (self.prev, self.play, self.next):
+                buttons.addWidget(button)
+            buttons.addStretch(1)
+            column.addLayout(buttons)
+            column.addStretch(1)
+            return
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 2, 4, 2)
+        row.setSpacing(6)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        text.setContentsMargins(0, 0, 0, 0)
+        text.addStretch(1)
+        text.addWidget(self.title)
+        text.addWidget(self.artist)
+        text.addStretch(1)
+        row.addWidget(self.thumb)
+        row.addLayout(text, 1)
+        for button in (self.prev, self.play, self.next):
+            row.addWidget(button)
+
     def _apply_style(self) -> None:
         style = self.style_name
         self.compact = self.theme_compact or style == "compact"
-        side = 26 if self.compact else 38
-        self.thumb.setVisible(style == "cover" or (style == "full" and not self.compact))
+        card = style == "full" and (self.tall or not self.theme_compact)
+        self._arrange(card)
+        side = CARD_COVER if card else 26 if self.compact else 38
+        self.thumb.setVisible((card and self.tall) or (not card and (style == "cover" or (style == "full" and not self.compact))))
         self.thumb.setFixedSize(side, side)
         self.title.setVisible(style in ("full", "compact"))
-        self.artist.setVisible(style == "full" and not self.compact)
+        self.artist.setVisible((card and self.tall) or (style == "full" and not self.compact and not card))
+        self.progress.setVisible(card)
         self.prev.setVisible(style != "cover")
         self.next.setVisible(style != "cover")
         self.setFixedWidth(MEDIA_WIDTHS.get(style, self.full_width))
         self._thumb_data = None  # das Cover wird in der neuen Größe neu zugeschnitten
+        self._background = QPixmap()
+        for widget in (self, self.title, self.artist, self.prev, self.play, self.next):
+            widget.style().unpolish(widget)  # die Karten-Regeln hängen an Eigenschaften der Box
+            widget.style().polish(widget)
 
     def update_media(self, media: dict | None) -> None:
         self._last = media
         self.setVisible(self.allowed and bool(media and media["title"]))
         if not media:
+            self._ticker.stop()
             return
-        width = max(60, self.width() - (100 if self.compact else 150))
+        width = self.width() - 16 - (CARD_COVER + 10 if self.tall else 0) if self.card else max(60, self.width() - (100 if self.compact else 150))
         metrics = self.title.fontMetrics()
         self.title.setText(metrics.elidedText(media["title"], Qt.TextElideMode.ElideRight, width))
         self.artist.setText(self.artist.fontMetrics().elidedText(media["artist"], Qt.TextElideMode.ElideRight, width))
         self.title.setToolTip(f"{media['title']}\n{media['artist']}".strip())
         self.play.setText(G.PAUSE if media["playing"] else G.PLAY)
+        duration = float(media.get("duration") or 0)
+        self._position = (float(media.get("position") or 0), duration, bool(media["playing"]), time.monotonic())
+        self.progress.setVisible(self.card and duration > 0)
+        self._tick()
+        if self.card and media["playing"] and duration > 0:
+            self._ticker.start()
+        else:
+            self._ticker.stop()
         if media["thumbnail"] != self._thumb_data:
             self._thumb_data = media["thumbnail"]
             pixmap = QPixmap()
+            self._cover = QPixmap()
+            self._background = QPixmap()
             if self._thumb_data and pixmap.loadFromData(self._thumb_data):
+                self._cover = pixmap
                 side = self.thumb.height()
                 # Viele Streams liefern 16:9 - mittig quadratisch zuschneiden.
                 scaled = pixmap.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                                        Qt.TransformationMode.SmoothTransformation)
                 x, y = (scaled.width() - side) // 2, (scaled.height() - side) // 2
-                self.thumb.setPixmap(scaled.copy(x, y, side, side))
+                square = scaled.copy(x, y, side, side)
+                self.thumb.setPixmap(rounded_pixmap(square, 8) if self.card else square)
             else:
                 self.thumb.clear()
+            self.update()
+
+    def _tick(self) -> None:
+        position, duration, playing, since = self._position
+        self.progress.light = self._light()
+        self.progress.set_value(media_progress(position, duration, playing, time.monotonic() - since))
+
+    def _light(self) -> bool:
+        return getattr(self.ctx.theme, "mode", "dark") == "light"
+
+    def resizeEvent(self, event) -> None:
+        self._background = QPixmap()
+        super().resizeEvent(event)
+
+    def _card_background(self) -> QPixmap:
+        """Cover zugeschnitten auf die Box, leicht weichgezeichnet, damit die Schrift ruhig darauf steht."""
+        if self._background.isNull() or self._background.size() != self.size():
+            x, y, w, h = cover_crop(self._cover.width(), self._cover.height(), self.width(), self.height())
+            part = self._cover.copy(x, y, w, h)
+            small = part.scaled(max(1, self.width() // 6), max(1, self.height() // 6),
+                                Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self._background = small.scaled(self.size(), Qt.AspectRatioMode.IgnoreAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation)
+        return self._background
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self.card or self._cover.isNull() or self.width() < 2 or self.height() < 2:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, self._card_background())
+        painter.fillRect(self.rect(), CARD_SHADE["light" if self._light() else "dark"])
 
 
 class Trash(IconButton):
@@ -506,7 +707,51 @@ class TaskButton(QPushButton):
             event.accept()
             return
         self._press = None
+        if event.button() == Qt.MouseButton.MiddleButton and self.rect().contains(event.position().toPoint()):
+            target = self._launch_target()  # Mittelklick öffnet ein neues Fenster, wie bei Windows
+            if target:
+                launch(self.dock.ctx, target)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
+
+    def _launch_target(self) -> str:
+        return self.target or (self.key if self.key.startswith("popwin:") else "")
+
+    def wheelEvent(self, event) -> None:
+        """Das Mausrad blättert durch die Fenster dieser App."""
+        live = [w.hwnd for w in self.windows if win_api.is_window(w.hwnd)]
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if len(live) < 2 or not delta:
+            return super().wheelEvent(event)
+        self.dock.ctx.task_preview.dismiss()
+        win_api.activate_window(next_window(live, win_api.foreground_window(), -1 if delta > 0 else 1))
+        event.accept()
+
+    def _add_window_actions(self, menu: QMenu) -> None:
+        """Fenster anordnen und Ton der App: nur, wenn es etwas zu ordnen oder zu hören gibt."""
+        live = [w for w in self.windows if win_api.is_window(w.hwnd)]
+        if not live:
+            return
+        hwnd = next((w.hwnd for w in live if w.hwnd == win_api.foreground_window()), live[0].hwnd)
+        tiles = menu.addMenu("Fenster anordnen")
+        for place, entry in TILES.items():
+            tiles.addAction(entry[0], lambda p=place: win_api.tile_window(hwnd, p))
+        tiles.addSeparator()
+        tiles.addAction("Maximieren", lambda: win_api.tile_window(hwnd, MAXIMIZE))
+        audio = self._audio()
+        if audio is not None:
+            muted = audio.muted()
+            menu.addAction("Ton wieder an" if muted else "Stummschalten", lambda: audio.set_muted(not muted))
+
+    def _audio(self):
+        """Die Ton-Sitzung dieser App im Windows-Mixer, falls sie gerade eine hat."""
+        from core.audio_mixer import read_apps
+        names = {os.path.basename(w.exe).lower() for w in self.windows if w.exe}
+        try:
+            return next((app for app in read_apps() if app.key in names), None)
+        except Exception:  # ohne Tonausgabe gibt es nichts stummzuschalten
+            return None
 
     def _activate(self) -> None:
         # --- [Antigravity Start] Nur noch existierende Fenster beachten & minimierte Vordergrundfenster aktivieren ---
@@ -563,6 +808,7 @@ class TaskButton(QPushButton):
             menu.addAction(label, lambda: self.dock.toggle_pin(self))
         if self.windows:
             menu.addSeparator()
+            self._add_window_actions(menu)
             label = "Fenster schließen" if len(self.windows) == 1 else "Alle Fenster schließen"
             menu.addAction(label, lambda: [win_api.close_window(w.hwnd) for w in self.windows])
             if not any(w.popwin_app in win_api.INTERNAL_APPS for w in self.windows):
@@ -583,7 +829,10 @@ class Dock(BarWindow):
         super().__init__(ctx, screen, edge, theme_name)
         self._buttons: dict[str, TaskButton] = {}
         self._signature = None
+        self._state = None  # was die Icons zuletzt gezeigt haben; unverändert heißt: nichts anfassen
         self.setAcceptDrops(True)
+        self._drag_hover = DragHover(self)  # Hinhalten beim Ziehen wechselt zur App
+        self._drag_hover.held.connect(self._drag_held)
 
         row = QHBoxLayout(self.root)
         row.setContentsMargins(6, 3, 6, 3)
@@ -601,7 +850,7 @@ class Dock(BarWindow):
             spacer.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.lead.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.trail.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.claude = ClaudeButton(ctx) if is_dev() else None  # nur im Dev-Build, ganz links
+        self.claude = make_claude_button(ctx)  # optionaler Zusatz-Knopf ganz links
         if self.claude is not None:
             row.addWidget(self.claude)
         row.addWidget(self.pad)
@@ -647,6 +896,7 @@ class Dock(BarWindow):
         self._order_held = False  # eine andere Taskbar zieht gerade
         self._glides: dict[TaskButton, QPropertyAnimation] = {}
         self.marks = TaskMarks(self, self.root)
+        self._layout: tuple | None = None
         self._magnify_timer = QTimer(self, interval=MAGNIFY_MS)  # läuft nur, solange die Maus auf den Icons ist
         self._magnify_timer.timeout.connect(self._magnify)
         self._approach_timer = QTimer(self, interval=APPROACH_MS)  # nur bei eingeschalteter Vergrößerung
@@ -655,12 +905,32 @@ class Dock(BarWindow):
         self._fixed_press: tuple[str, QPoint] | None = None
         self._fixed_drag = ""
         self._fixed_glides: dict[QWidget, QPropertyAnimation] = {}
-        self.timer = QTimer(self, interval=700)
+        self.timer = QTimer(self, interval=1000)
         self.timer.timeout.connect(self.refresh)
-        self.timer.start()
         ctx.config.changed.connect(self._on_config)
         ctx.media.updated.connect(self._fit_width)  # Now Playing macht die Leiste breiter
         self._on_config("profile")
+        self._layout = self._layout_key()
+
+    def dock(self) -> None:
+        super().dock()
+        self._layout = self._layout_key()
+        if not (hasattr(self.ctx, "_bar_sync_timer") and self.ctx._bar_sync_timer.isActive()):
+            self.timer.start()
+
+    def undock(self) -> None:
+        self.timer.stop()
+        self._pill_timer.stop()
+        self.clock.timer.stop()
+        if self.pill is not None:
+            self.pill.face.timer.stop()
+            self.pill.hide()
+        if self.tools is not None:
+            self.tools.stop()
+        super().undock()
+
+    def _layout_key(self) -> tuple:
+        return (self.bar_size(), self.auto_hides(), self.reserves_space(), self._fits_content(), self.option("dock_align"))
 
     def contextMenuEvent(self, event) -> None:
         """Rechtsklick auf die freie Fläche: repariert hängende Zustände sofort und zeigt das Menü."""
@@ -686,8 +956,10 @@ class Dock(BarWindow):
         toggle("Papierkorb", "show_recycle")
         toggle("Nova", "show_nova_button")
         toggle("Knopf „Desktop anzeigen“", "show_desktop")
-        if is_dev():  # [Antigravity: Claude-Knopf umschaltbar wie andere Hauptbuttons]
-            toggle("Claude-Knopf", "dev_claude_button")
+        if is_dev():
+            toggle_label = dev_label("dock_toggle")
+            if toggle_label:
+                toggle(toggle_label, "dev_claude_button")
         toggle("App-Namen", "task_labels")
         toggle("Schwebendes Dock", "dock_floating")
         menu.addSeparator()
@@ -732,6 +1004,7 @@ class Dock(BarWindow):
         self._dropping = None
         self._order_held = False
         self._slot_origin = None
+        self._drag_hover.leave()
         set_prop(self.root, "dropping", False)
         for button in list(self._buttons.values()):
             button.reset_state()
@@ -748,6 +1021,7 @@ class Dock(BarWindow):
             self.ctx._windows_time = 0.0
         self._enforce_placement()
         self._place_in_z()
+        self._state = None
         if rebuild:
             self._signature = None
         elif self._buttons:
@@ -901,7 +1175,7 @@ class Dock(BarWindow):
             self.media.allowed = self.option("show_media") and self.edge not in ("left", "right")  # [Antigravity: Sidebar schmal halten]
             self.media.set_style(self.option("media_style"), self.option("media_width"))
             self.media.update_media(self.media._last)
-            if self.claude is not None:  # [Antigravity: Claude-Knopf sofort aktualisieren]
+            if self.claude is not None:  # optionalen Zusatz-Knopf sofort aktualisieren
                 self.claude.setVisible(self.claude_on_button())
             self.trash.setVisible(self.option("show_recycle"))
             self.nova.setVisible(self.option("show_nova_button") and self.ctx.nova_enabled())
@@ -927,9 +1201,16 @@ class Dock(BarWindow):
             self._apply_native_backdrop()
             self._round_corners()
             self.refresh(force=True)
-            self.reposition()
             if self._registered:
-                self._sync_auto_hide()
+                layout = self._layout_key()
+                if layout != self._layout:
+                    prev_auto = self._layout[1] if self._layout else layout[1]
+                    self._layout = layout
+                    self.reposition()
+                    if layout[1] != prev_auto:
+                        self._sync_auto_hide()
+                elif self._fits_content():
+                    self._fit_width()
 
     def _fits_content(self) -> bool:
         return self.option("dock_style") == "fit" or self.floating()
@@ -957,16 +1238,24 @@ class Dock(BarWindow):
             elif side:
                 row.addWidget(self.clock)
         self.clock.setVisible(bool(side))
+        if side:
+            if not self.clock.timer.isActive():
+                self.clock.timer.start()
+        else:
+            self.clock.timer.stop()
         self.clock.arrange(one_line=self.bar_size() < 40 or None)
         if place == "dock_center":
             if self.pill is None:
                 self.pill = ClockPill(self)
                 self.destroyed.connect(self.pill.deleteLater)
+            if not self.pill.face.timer.isActive():
+                self.pill.face.timer.start()
             self.pill.face.tick()
             self._pill_timer.start()
         else:
             self._pill_timer.stop()
             if self.pill is not None:
+                self.pill.face.timer.stop()
                 self.pill.hide()
         self._follow_pill()
 
@@ -1028,7 +1317,8 @@ class Dock(BarWindow):
         menu = self.ctx.start_menu
         mine = menu.anchor is self.start or (menu.anchor is None and self.ctx.monitors.is_primary(self.bar_screen))
         on_tools = self.tools is not None and self.tools.isVisible() and self.tools.frameGeometry().contains(QCursor.pos())
-        return (on_tools or self._dragged is not None or self._dropping is not None or QApplication.activePopupWidget() is not None
+        return (on_tools or self._dragged is not None or self._dropping is not None or self._drag_hover.active()
+                or QApplication.activePopupWidget() is not None
                 or self.ctx.task_preview.isVisible() or (menu.isVisible() and not menu.animator.closing and mine))
 
     def bar_size(self) -> int:
@@ -1082,29 +1372,82 @@ class Dock(BarWindow):
             clock = self.clock.width() + spacing if self.clock.isVisibleTo(self) else 0
             right, left = (right + clock, left) if self._clock_at == "dock_right" else (right, left + clock)
             # Was auf einer Seite mehr steht, gleicht ein leerer Platz auf der anderen aus; sonst rutschen die Icons
-            # aus der echten Mitte, etwa wenn rechts alles in der Symbolleiste darüber steht und links der Claude-Knopf.
+            # aus der echten Mitte, etwa wenn rechts alles in der Symbolleiste darüber steht und links der optionale Zusatz-Knopf.
             self.pad.setFixedWidth(max(0, right - left))
             self.pad_end.setFixedWidth(max(0, left - right))
 
     def _icon_size(self) -> int:
         return min(self.option("icon_size"), self.bar_size() - 12)
 
-    # --- Anheften per Drag and Drop -------------------------------------------
+    # --- Anheften per Drag and Drop, Hinhalten wechselt die App -----------------
+    @staticmethod
+    def _pinnable(mime) -> bool:
+        urls = mime.urls()
+        return bool(urls) and all(u.isLocalFile() for u in urls)
+
+    def _drag_target(self, position: QPoint) -> QWidget | None:
+        """Der Task mit offenen Fenstern oder der Knopf „Desktop anzeigen“ unter dem Gezogenen, sonst nichts."""
+        if not self.ctx.config.get("taskbar.drag_switch", True):
+            return None
+        widget = self.childAt(position)
+        while widget is not None and widget is not self:
+            if widget is self.desktop or (isinstance(widget, TaskButton) and widget.windows):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
     def dragEnterEvent(self, event) -> None:
-        urls = event.mimeData().urls()
-        if urls and all(u.isLocalFile() for u in urls):
+        # Alles annehmen, auch Text und Bilder: Ohne das meldet Qt keine Bewegung, und das Hinhalten bliebe unbemerkt.
+        if self._pinnable(event.mimeData()):
             set_prop(self.root, "dropping", True)
             event.acceptProposedAction()
+        elif self.ctx.config.get("taskbar.drag_switch", True):
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.accept()
+
+    def dragMoveEvent(self, event) -> None:
+        target = self._drag_target(event.position().toPoint())
+        self._drag_hover.over(target)
+        pinnable = target is None and self._pinnable(event.mimeData())
+        set_prop(self.root, "dropping", pinnable)
+        if pinnable:
+            event.acceptProposedAction()
+        else:  # über einem Task lässt sich nichts ablegen, wie bei Windows
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.ignore()
 
     def dragLeaveEvent(self, event) -> None:
+        self._drag_hover.leave()
         set_prop(self.root, "dropping", False)
+        # Zeigt die Vorschau gerade die Fenster zum Ablegen, bleibt sie kurz stehen, bis der Zeiger auf ihr ist.
+        if self.ctx.task_preview.isVisible():
+            self.ctx.task_preview.unhover()
 
     def dropEvent(self, event) -> None:
+        target = self._drag_target(event.position().toPoint())
+        self._drag_hover.leave()
         set_prop(self.root, "dropping", False)
+        if target is not None or not self._pinnable(event.mimeData()):
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.ignore()
+            return
         paths = [os.path.normpath(u.toLocalFile()) for u in event.mimeData().urls()]
         event.acceptProposedAction()
         # Der Explorer wartet, bis dieser Handler zurückkehrt.
         QTimer.singleShot(0, lambda: self.pin_paths(paths))
+
+    def _drag_held(self, target) -> None:
+        """Das Gezogene stand lange genug über `target`: zur App wechseln, damit man dort ablegen kann."""
+        if target is self.desktop:
+            win_api.toggle_desktop()
+            return
+        if not isinstance(target, TaskButton) or self._buttons.get(target.key) is not target:
+            return  # die Taskbar wurde inzwischen neu aufgebaut, den Knopf gibt es nicht mehr
+        live = [w for w in target.windows if win_api.is_window(w.hwnd)]
+        if len(live) == 1:
+            win_api.activate_for_drop(live[0].hwnd)
+        elif live:  # mehrere Fenster: Die Vorschau zeigt sie, Hinhalten über einer Karte wählt eines
+            self.ctx.task_preview.show_for_drag(target)
 
     def pin_paths(self, paths: list[str]) -> None:
         self._store_pins(merge_pins(self._own_pins(), [pin_for_path(p) for p in paths]))
@@ -1198,7 +1541,8 @@ class Dock(BarWindow):
             animation.setEasingCurve(QEasingCurve.Type.OutCubic)
             animation.finished.connect(lambda b=button: self._glide_done(b))
         animation.stop()
-        duration = GLIDE_MS if self.ctx.config.get("animations.enabled") else 0
+        duration = animation_duration(
+            self.ctx.config.get("animations"), scale=0.77, max_reduced=70, max_duration=GLIDE_MS)
         animation.setDuration(duration)
         animation.setStartValue(button.pos())
         animation.setEndValue(QPoint(button.x(), x) if self.edge in ("left", "right") else QPoint(x, button.y()))  # [Antigravity: Sidebar Support]
@@ -1304,6 +1648,7 @@ class Dock(BarWindow):
     def _commit_drop(self) -> None:
         self._dropping = None
         self._slot_origin = None
+        self._state = None
         self.save_order()
         self.apps.activate()
         self.refresh()
@@ -1319,7 +1664,7 @@ class Dock(BarWindow):
         self.ctx.config.set("taskbar.order", orders, notify=False)
 
     def claude_on_button(self) -> bool:
-        """Mit dem Claude-Knopf steht Claude nicht noch einmal zwischen den Tasks."""
+        """Mit dem Zusatz-Knopf steht die zugehörige App nicht noch einmal zwischen den Tasks."""
         return self.claude is not None and bool(self.option("dev_claude_button"))
 
     def _windows_here(self) -> list[win_api.WindowInfo]:
@@ -1545,7 +1890,7 @@ class Dock(BarWindow):
             groups.setdefault(key, new_group)["windows"].append(window)
         if self._synced():
             shared = self.ctx.config.get("taskbar.order").get(SHARED_ORDER, [])
-            self._order = synced_order(shared, [pin_key(p) for p in self.visible_pins()], list(groups))
+            self._order = synced_order(shared, [pin_key(p) for p in pins], list(groups))
         else:
             self._order += [key for key in groups if key not in self._order]
         groups = {key: groups[key] for key in ordered_keys(list(groups), self._order)}
@@ -1554,11 +1899,20 @@ class Dock(BarWindow):
         notices = visible_notices(self.ctx.notifications.notices, self.ctx.config.get("notifications.hidden"))             if self.task_badges else []
         labels = notice_labels(notices, self.ctx.apps.apps) if notices else {}
         signature = (tuple(groups), self._icon_size())
-        if force or signature != self._signature:
+        structure_changed = force or signature != self._signature
+        if structure_changed:
             only_order = not force and self._signature is not None and signature[1] == self._signature[1] \
                 and set(signature[0]) == set(self._signature[0])
             self._signature = signature
             self._rearrange(groups) if only_order else self._rebuild(groups)
+            self._state = None
+        # Die meisten Durchläufe ändern nichts. Dann bleiben Stil, Indikatoren und Breite, wie sie sind,
+        # statt alle 0,7 s jeden Knopf neu zu stylen und die Leiste neu zu zeichnen.
+        state = task_state(groups, foreground, win_api.is_minimized, notices,
+                           (self.task_labels, self.task_badges, self.edge, self.theme_name, self.width(), self._side_sizes()))
+        if not force and state == self._state:
+            return
+        self._state = state
         for key, group in groups.items():
             button = self._buttons[key]
             button.windows = group["windows"]
@@ -1578,6 +1932,17 @@ class Dock(BarWindow):
         self.marks.update()
         self._align_icons()
         self._fit_width()  # die Leiste wächst und schrumpft mit den Apps
+        if _window_icon_cache:
+            live = {(w.hwnd, w.pid) for w in self.ctx.windows()}
+            for key in [k for k in _window_icon_cache if k not in live]:
+                _window_icon_cache.pop(key, None)
+
+    def _side_sizes(self) -> tuple:
+        """Sichtbarkeit und Breite der festen Teile neben den Icons: Erscheint etwa der Player, muss die Mitte neu sitzen."""
+        parts = [self.start, self.search, self.media, self.nova, self.trash, self.desktop, self.clock]
+        if self.claude is not None:
+            parts.append(self.claude)
+        return tuple((part.isVisibleTo(self), part.width()) for part in parts)
 
     def _rearrange(self, groups: dict) -> None:
         """Nur die Reihenfolge ist neu: Die Knöpfe bleiben dieselben, ein Neuaufbau ließe alle Icons kurz aufblitzen."""
@@ -1654,10 +2019,22 @@ class Dock(BarWindow):
 
     @staticmethod
     def _window_icon(windows: list) -> QIcon:
+        now = time.monotonic()
         for window in windows:
+            key = (window.hwnd, window.pid)
+            cached = _window_icon_cache.get(key)
+            if cached is not None and now - cached[1] < WINDOW_ICON_TTL_S:
+                return cached[0]
             handle = win_api.window_hicon(window.hwnd)
             if handle:  # gehört dem Fenster, also nicht freigeben
                 image = QImage.fromHICON(handle)
                 if not image.isNull():
-                    return QIcon(QPixmap.fromImage(image))
+                    icon = QIcon(QPixmap.fromImage(image))
+                    _window_icon_cache.pop(key, None)
+                    if len(_window_icon_cache) >= MAX_WINDOW_ICON_CACHE:
+                        _window_icon_cache.pop(next(iter(_window_icon_cache)))
+                    _window_icon_cache[key] = (icon, now)
+                    return icon
+            if cached is not None:  # neu lesen klappte nicht, das alte Symbol ist besser als keins
+                return cached[0]
         return QIcon()

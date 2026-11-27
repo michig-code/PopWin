@@ -109,6 +109,11 @@ class QuickPanel(PopupPanel):
             self.grid.addWidget(tile, index // 3, index % 3)
             tile.show()  # erst einsortieren, dann zeigen
 
+    def apply_theme(self) -> None:
+        super().apply_theme()
+        if self.isVisible():
+            self.refresh()
+
     def show_at(self, anchor) -> None:
         self.outputs_title.setText("Audiogeräte")
         self.outputs.refresh()

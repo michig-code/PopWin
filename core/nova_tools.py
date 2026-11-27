@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core import ai_actions, nova_artifacts, win_api
-from core.dev import is_dev
+from core.dev import extra_nova_tools, is_dev
 from core.gemini_client import client_for
 from core.nova_connections import Connections
 from core.paths import FROZEN, ROOT, app_command
@@ -23,7 +23,7 @@ from core.paths import FROZEN, ROOT, app_command
 log = logging.getLogger(__name__)
 
 FREE, ASK, ALWAYS = "frei", "fragen", "immer fragen"
-DEV = "dev"  # nur im Entwickler-Build, etwa die OVH-Anbindung
+OPTIONAL = "optional"  # nur verfügbar, wenn das optionale Zusatzmodul geladen ist
 MAX_READ = 20000
 TOOL_SECONDS = 60
 MAX_OUTPUT = 4000
@@ -108,7 +108,7 @@ TOOLS = (
          {"title": (_STRING, "Kurzer Titel"), "kind": (_STRING, "aufgabe, notiz, ueberwachung oder werkzeug"),
           "content": (_STRING, "Notiz oder bei werkzeug der Python-Code"),
           "steps": (_STRING, "Schritte der Checkliste, einer pro Zeile"), "due": (_STRING, "Fälligkeit als JJJJ-MM-TT"),
-          "check": (_STRING, "Nur bei ueberwachung: eingebaute Prüfung, etwa ovh_domains"),
+          "check": (_STRING, "Nur bei ueberwachung: Name einer eingebauten Prüfung, falls vorhanden"),
           "tool": (_STRING, "Nur bei ueberwachung: Kennung eines Werkzeugs, das die Prüfung macht"),
           "read_only": (_BOOL, "Nur bei werkzeug: wahr, wenn es nur liest und nichts ändert"),
           "connection": (_STRING, "Nur bei werkzeug: Name der Verbindung, deren Keys es mit secret('feld') bekommt")},
@@ -140,24 +140,15 @@ TOOLS = (
     Tool("artifact_run_tool", ALWAYS, "Führt ein Werkzeug aus",
          "Führt ein Werkzeug-Artefakt aus und liefert seine Ausgabe. Der Host sieht vorher den Code.",
          {"id": (_STRING, "Kennung oder Teil des Titels")}, ("id",)),
-    Tool("ovh_overview", ASK, "Sieht bei OVH nach",
-         "Liest die Domains des Hosts bei OVH: Ablaufdatum, Nameserver, DNS-Einträge und Erreichbarkeit. Ändert nichts.",
-         {"records": (_BOOL, "Wahr, um die DNS-Einträge einzeln aufzulisten")}, needs=DEV),
-    Tool("ovh_dns_change", ALWAYS, "Ändert einen DNS-Eintrag bei OVH",
-         "Legt einen DNS-Eintrag bei OVH an, ändert oder löscht ihn und lädt die Zone danach neu. Der Host sieht vorher alt → neu.",
-         {"zone": (_STRING, "Domain, etwa example.de"), "subdomain": (_STRING, "Subdomain, leer oder @ für die Domain selbst"),
-          "field_type": (_STRING, "A, AAAA, CNAME, MX, TXT, NS, SRV oder CAA"), "target": (_STRING, "Ziel des Eintrags"),
-          "ttl": (_NUMBER, "TTL in Sekunden, 0 für den Standard"), "action": (_STRING, "set (Standard), add oder delete"),
-          "artifact": (_STRING, "Kennung des Artefakts, in dessen Verlauf die Änderung landet")},
-         ("zone", "field_type"), needs=DEV),
 )
+TOOLS = (*TOOLS, *extra_nova_tools(Tool, ASK, ALWAYS, OPTIONAL))
 BY_NAME = {tool.name: tool for tool in TOOLS}
 # Ein Werkzeug soll nie an Zugangsdaten kommen. Python kann alles, deshalb sieht der Host den Code vor jeder neuen Fassung.
 FORBIDDEN_IN_TOOLS = ("keyring", "win32cred", "credread", "credential", "ovh_application", "ovh_consumer")
 
 
 def available(tool: Tool, allowed: dict) -> bool:
-    if tool.needs == DEV:
+    if tool.needs == OPTIONAL:
         return is_dev()
     return not tool.needs or bool(allowed.get(tool.needs))
 
@@ -339,11 +330,11 @@ def _set_clipboard(text: str) -> None:
 
 
 def ovh_module():
-    """Die OVH-Anbindung gibt es nur im Dev-Build. Über importlib, damit PyInstaller devtools nie einpackt."""
+    """Optionale Domain-Anbindung, falls das Zusatzmodul vorhanden ist."""
     if not is_dev():
-        raise PermissionError("Die OVH-Anbindung gibt es nur im Entwickler-Build.")
+        raise PermissionError("Diese eingebaute Prüfung ist in dieser Ausgabe nicht verfügbar.")
     import importlib
-    return importlib.import_module("devtools.ovh_domains")
+    return importlib.import_module("_private.devmenu.ovh_domains")
 
 
 def ovh_secrets(config) -> tuple[str, ...]:
@@ -560,9 +551,10 @@ class Toolbox:
         artifact = nova_artifacts.new_artifact(title, kind, content, _lines(steps))
         if check:
             if check not in nova_artifacts.CHECKS:
-                raise ValueError(f"Unbekannte Prüfung {check}. Es gibt: {', '.join(nova_artifacts.CHECKS)}")
-            if check == "ovh_domains":
-                ovh_module()
+                available_checks = ", ".join(nova_artifacts.CHECKS) or "keine"
+                raise ValueError(f"Unbekannte Prüfung {check}. Verfügbar: {available_checks}")
+            if not self.has_check(check):
+                raise PermissionError("Diese eingebaute Prüfung ist in dieser Ausgabe nicht verfügbar.")
             artifact["check"] = check
         if tool:
             helper = self.artifacts.get(tool)
@@ -644,8 +636,14 @@ class Toolbox:
         self._store(artifact)
         return f"Nächste Prüfung: {artifact['next_check'] or 'keine'}"
 
+    def has_check(self, name: str) -> bool:
+        """Ob die eingebaute Prüfung in dieser Ausgabe verfügbar ist."""
+        if name == "ovh_domains":
+            return self.has_ovh()
+        return name in nova_artifacts.CHECKS
+
     def has_ovh(self) -> bool:
-        """Die eingebaute OVH-Prüfung gibt es nur im Dev-Build; eigene OVH-Werkzeuge kann jeder bauen."""
+        """Ob die optionale Domain-Prüfung verfügbar ist; eigene Werkzeuge kann jeder bauen."""
         try:
             ovh_module()
             return True
@@ -677,7 +675,7 @@ class Toolbox:
             return False
         return bool(artifact.get("read_only") and artifact.get("approved") == nova_artifacts.code_hash(artifact.get("code", "")))
 
-    # --- OVH, nur im Dev-Build ----------------------------------------------------------
+    # --- Optionale Domain-Werkzeuge ----------------------------------------------------
     def t_ovh_overview(self, records: bool = False) -> str:
         from datetime import date
         ovh = ovh_module()

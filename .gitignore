@@ -2,9 +2,12 @@
 config/*
 !config/config_manager.py
 nova/
+_private/
 devtools/
 GEMINI.md
 /*.bat
+**/pin.json
+*.bak
 *.log
 *.log.*
 popwin.pid

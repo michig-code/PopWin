@@ -16,7 +16,7 @@ class MediaWidget(DeskletWindow):
 
     def build(self) -> None:
         self.idle = QLabel("Gerade läuft nichts", objectName="Muted")
-        self.box = MediaBox(self.ctx, width=self.DEFAULT_WIDTH - 24)
+        self.box = MediaBox(self.ctx, width=self.DEFAULT_WIDTH - 24, tall=True)
         self.body.addWidget(self.idle)
         self.body.addWidget(self.box)
         self.ctx.media.updated.connect(self._sync)

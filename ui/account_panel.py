@@ -128,7 +128,9 @@ class AccountPanel(PopupPanel):
 
     def _sign_out(self) -> None:
         """Abmelden schließt alle Apps; deshalb erst beim zweiten Klick."""
-        if self.sign_out.text() != SIGN_OUT_CONFIRM:
+        # Geprüft wird der Zustand, nicht der Button-Text: der ist in jeder Sprache anders übersetzt.
+        if not getattr(self, "_sign_out_armed", False):
+            self._sign_out_armed = True
             self.sign_out.setText(SIGN_OUT_CONFIRM)
             set_prop(self.sign_out, "alert", True)
             return

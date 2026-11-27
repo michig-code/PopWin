@@ -9,7 +9,8 @@ import ctypes
 from ctypes import wintypes
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QVariantAnimation
+import shiboken6
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QTabBar, QVBoxLayout, QWidget,
@@ -126,9 +127,11 @@ class MouseButtons(QObject):
 
 
 class NativeWindow(ThemedWindow):
-    def __init__(self, ctx, title: str, icon: str = "popwin"):
+    def __init__(self, ctx, title: str, icon: str = "popwin", system_frame: bool = False):
         """icon: Name der Bilddatei in assets, ohne Endung."""
-        super().__init__(ctx, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint, translucent=False)
+        self._system_frame = bool(system_frame)
+        flags = Qt.WindowType.Window if self._system_frame else (Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        super().__init__(ctx, flags, translucent=False)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setObjectName("SettingsRoot")
         self.setWindowTitle(title)
@@ -137,13 +140,17 @@ class NativeWindow(ThemedWindow):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.titlebar = TitleBar(self, title, icon)
-        layout.addWidget(self.titlebar)
+        if self._system_frame:
+            self.titlebar = None
+        else:
+            self.titlebar = TitleBar(self, title, icon)
+            layout.addWidget(self.titlebar)
         self.content = QWidget()
         layout.addWidget(self.content, 1)
         self._framed = False
         self._normal_rect: tuple[int, int, int, int] | None = None
-        self._frame_styles()  # schon vor dem ersten Zeigen, sonst fehlt beim ersten Öffnen die Animation von Windows
+        if not self._system_frame:
+            self._frame_styles()  # schon vor dem ersten Zeigen, sonst fehlt beim ersten Öffnen die Animation von Windows
         MouseButtons.install()
 
     def mouse_step(self, step: int) -> None:
@@ -155,14 +162,26 @@ class NativeWindow(ThemedWindow):
         if not self.isMaximized() and self.y() < area.top():
             self.move(self.x(), area.top())
 
+    def _sync_system_titlebar(self) -> None:
+        if not self._system_frame:
+            return
+        dark = self.ctx.theme.mode == "dark"
+        caption = ("#131722" if dark else "#F2F5FA") if self.ctx.theme.current == "aurora" else ""
+        win_api.set_dark_titlebar(int(self.winId()), dark, caption)
+
     # --- Windows-Fensterstile ------------------------------------------------------
     def showEvent(self, event) -> None:
         super().showEvent(event)
         QTimer.singleShot(0, self.keep_in_work_area)
-        self._frame_styles()
+        if self._system_frame:
+            self._sync_system_titlebar()
+        else:
+            self._frame_styles()
 
     def _frame_styles(self) -> None:
         """Prüft bei jedem Zeigen nach: Qt baut das Fenster bei manchen Änderungen neu und setzt dabei seine Stile."""
+        if self._system_frame:
+            return
         hwnd = int(self.winId())
         style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE) & 0xFFFFFFFF
         if self._framed and style == native_style(style):
@@ -177,8 +196,10 @@ class NativeWindow(ThemedWindow):
         user32.SetWindowPos(int(self.winId()), None, 0, 0, 0, 0, win_api.SWP_NOMOVE | win_api.SWP_NOSIZE | win_api.SWP_NOZORDER
                             | win_api.SWP_NOACTIVATE | SWP_FRAMECHANGED)
 
-    def apply_theme(self) -> None:
-        super().apply_theme()
+    def _apply_window_effects(self, meta: dict) -> None:
+        if self._system_frame:
+            self._sync_system_titlebar()
+            return
         hwnd = int(self.winId())
         win_api.set_blur(hwnd, "none")
         win_api.set_rounded(hwnd, True)
@@ -191,7 +212,12 @@ class NativeWindow(ThemedWindow):
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
-        if event.type() == QEvent.Type.WindowStateChange and self.isMaximized() and self._normal_rect:
+        if (
+            not self._system_frame
+            and event.type() == QEvent.Type.WindowStateChange
+            and self.isMaximized()
+            and self._normal_rect
+        ):
             QTimer.singleShot(0, lambda: win_api.fix_normal_position(int(self.winId()), self._normal_rect))
         titlebar = getattr(self, "titlebar", None)  # Qt meldet schon den Fenstertitel, bevor sie existiert
         if titlebar:
@@ -205,6 +231,8 @@ class NativeWindow(ThemedWindow):
         return QPoint(x - rect[0], y - rect[1]), rect
 
     def _hit_test(self, lparam: int) -> int:
+        if self.titlebar is None:
+            return HTCLIENT
         native, rect = self._local(lparam)
         if not user32.IsZoomed(int(self.winId())):
             edge = hit_edge(native.x(), native.y(), rect[2] - rect[0], rect[3] - rect[1])
@@ -220,6 +248,10 @@ class NativeWindow(ThemedWindow):
 
     def nativeEvent(self, event_type, message):
         msg = wintypes.MSG.from_address(int(message))
+        if self._system_frame:
+            if msg.message == WM_EXITSIZEMOVE:
+                self.keep_in_work_area()
+            return False, 0
         if msg.message == WM_WINDOWPOSCHANGED and not user32.IsZoomed(msg.hWnd) and not user32.IsIconic(msg.hWnd):
             self._normal_rect = win_api.window_rect(msg.hWnd)
         if msg.message == WM_EXITSIZEMOVE:
@@ -256,14 +288,40 @@ class NativeWindow(ThemedWindow):
 
 def fade_in_page(page: QWidget, duration: int) -> None:
     """Sanfter Seitenwechsel innerhalb des Fensters, unabhängig von Windows-Animationen."""
-    if not duration:
+    if not shiboken6.isValid(page):
+        return
+    prev = getattr(page, "_page_fade", None)
+    if prev is not None and shiboken6.isValid(prev):
+        prev.stop()
+        prev.deleteLater()
+    if duration <= 0:
+        page._page_fade = None
+        if page.graphicsEffect() is not None:
+            page.setGraphicsEffect(None)
         return
     effect = QGraphicsOpacityEffect(page)
+    effect.setOpacity(0.0)
     page.setGraphicsEffect(effect)
     fade = QVariantAnimation(page)
+    page._page_fade = fade
     fade.setDuration(duration)
+    fade.setEasingCurve(QEasingCurve.Type.OutQuad)
     fade.setStartValue(0.0)
     fade.setEndValue(1.0)
-    fade.valueChanged.connect(effect.setOpacity)
-    fade.finished.connect(lambda: page.setGraphicsEffect(None))
+
+    def _on_value(value) -> None:
+        if shiboken6.isValid(effect):
+            effect.setOpacity(value)
+
+    def _on_done() -> None:
+        if shiboken6.isValid(page):
+            if getattr(page, "_page_fade", None) is fade:
+                page._page_fade = None
+            if page.graphicsEffect() is effect:
+                page.setGraphicsEffect(None)
+        if shiboken6.isValid(fade):
+            fade.deleteLater()
+
+    fade.valueChanged.connect(_on_value)
+    fade.finished.connect(_on_done)
     fade.start()

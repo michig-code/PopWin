@@ -21,31 +21,93 @@ from core.paths import ROOT
 
 log = logging.getLogger(__name__)
 
-LANGUAGES = {"de": "Deutsch", "en": "English", "es": "Español", "fr": "Français"}
-AUTO = "auto"
+BASE = "de"  # Der Code ist deutsch: Für Deutsch braucht es keine Datei
+FALLBACK = "en"
+AUTO = "system"  # Wert der Einstellung "language"; das frühere "auto" gilt weiter als Systemsprache
+_LEGACY_AUTO = ("auto", "", None)
+_NAMES = {"de": "Deutsch", "en": "English", "es": "Español", "fr": "Français", "it": "Italiano", "pt": "Português (Brasil)",
+          "nl": "Nederlands", "pl": "Polski", "tr": "Türkçe", "ru": "Русский", "uk": "Українська", "ja": "日本語",
+          "ko": "한국어", "zh": "中文（简体）", "ar": "العربية", "sv": "Svenska", "da": "Dansk", "nb": "Norsk", "cs": "Čeština",
+          "hu": "Magyar", "el": "Ελληνικά", "hi": "हिन्दी", "ro": "Română", "fi": "Suomi"}
 _table: dict[str, str] = {}
 _patterns: list[tuple[re.Pattern, str]] = []
 _FILTER: list = []
 
 
+def _lang_dir():
+    return ROOT / "assets" / "lang"
+
+
+def available() -> list[str]:
+    """Alle Sprachcodes: Deutsch (eingebaut) plus jede Datei in assets/lang. Neue Sprachen erscheinen so von selbst."""
+    codes = {BASE}
+    try:
+        codes.update(path.stem for path in _lang_dir().glob("*.json"))
+    except OSError:
+        pass
+    return sorted(codes, key=lambda code: (code != BASE, code != FALLBACK, code))
+
+
+def language_name(code: str) -> str:
+    if code in _NAMES:
+        return _NAMES[code]
+    name = QLocale(code).nativeLanguageName()
+    return (name[:1].upper() + name[1:]) if name else code
+
+
+def languages() -> dict[str, str]:
+    """Sprachcode -> eigener Sprachname, für die Auswahl in den Einstellungen."""
+    return {code: language_name(code) for code in available()}
+
+
+def match_language(candidates, codes=None) -> str | None:
+    """Bildet Windows-Sprachkennungen wie "de-AT" oder "pt_BR" auf einen vorhandenen Code ab (erst genau, dann ohne Region)."""
+    codes = list(codes if codes is not None else available())
+    lowered = {code.lower().replace("_", "-"): code for code in codes}
+    for candidate in candidates:
+        tag = str(candidate).strip().lower().replace("_", "-")
+        while tag:
+            if tag in lowered:
+                return lowered[tag]
+            tag = tag.rpartition("-")[0]
+    return None
+
+
+def system_language() -> str:
+    try:
+        locale = QLocale.system()
+        tags = list(locale.uiLanguages()) + [locale.name()]
+    except Exception:  # noqa: BLE001 - die Systemsprache ist nie wichtig genug zum Abstürzen
+        tags = []
+    return match_language(tags) or FALLBACK
+
+
 def wanted_language(setting: str, system: str | None = None) -> str:
-    """Die eingestellte Sprache; auf Automatisch die von Windows, oder Englisch, wenn es sie hier nicht gibt."""
-    if setting in LANGUAGES:
+    """Die eingestellte Sprache; auf Systemsprache die von Windows, sonst Englisch."""
+    codes = available()
+    if setting in codes:
         return setting
-    code = (system or QLocale.system().name())[:2]
-    return code if code in LANGUAGES else "en"
+    if setting in _LEGACY_AUTO or setting == AUTO:
+        return (match_language([system], codes) or FALLBACK) if system else system_language()
+    return FALLBACK
+
+
+def _read(code: str) -> dict[str, str]:
+    try:
+        return json.loads((_lang_dir() / f"{code}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("Sprache %s nicht lesbar: %s", code, exc)
+        return {}
 
 
 def load(code: str) -> None:
+    """Ersatzkette: gewählte Sprache -> Englisch -> der deutsche Schlüssel selbst."""
     _table.clear()
     _patterns.clear()
-    if code == "de":
+    if code == BASE:
         return
-    try:
-        table = json.loads((ROOT / "assets" / "lang" / f"{code}.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.warning("Sprache %s nicht lesbar: %s", code, exc)
-        return
+    table = _read(FALLBACK) if code != FALLBACK else {}
+    table.update(_read(code))
     _table.update(table)
     templates = [key for key in table if "{}" in key]
     for key in sorted(templates, key=len, reverse=True):  # längere zuerst, sie sind genauer

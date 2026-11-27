@@ -16,6 +16,7 @@ from core.theme_manager import THEME_DIR, TILE_MODES, TILE_SHAPES
 
 # Farben für die kleinen Vorschaukarten der eingebauten Themes: (Hintergrund, Fläche, Akzent, Akzent 2)
 SWATCHES = {
+    "aurora": ("#131722", "#1A2030", "#4EE2C0", "#6CA8FF"),
     "liquid_glass": ("#1B2230", "#3A4458", "#FFFFFF", "#9CC8FF"),
     "pop_basic": ("#2A2A2A", "#3C3C3C", "#48B9C7", "#FAA41A"),
     "clean": ("#202020", "#2E2E2E", "#0078D4", "#60CDFF"),
@@ -274,7 +275,7 @@ class ThemePage(QObject):
         mode.addItem("Hell", "light")
         mode.setCurrentIndex(mode.findData(self.ctx.theme.mode))
         mode.currentIndexChanged.connect(lambda _i: self.ctx.set_dark_mode(mode.currentData()))
-        self.settings.mode_combo = mode
+        self.settings.theme_mode_combo = mode  # mode_combo gehört der Seite „Design“; beide hält apply_theme gleich
         form.addRow("Modus (auch für Windows)", mode)
         tiles = QComboBox()
         for value, label in TILE_MODES.items():

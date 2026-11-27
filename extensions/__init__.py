@@ -38,14 +38,29 @@ class Extension:
         """Füllt das QFormLayout dieser Erweiterung auf der Einstellungsseite."""
 
 
+# Eingebaute Erweiterungen: (Modul, Klasse). Neue kommen einfach hier dazu.
+BUILTIN = (
+    ("extensions.discord", "DiscordStream"),
+    ("extensions.tts_for_windows", "TextToSpeechExtension"),
+)
+
+
 class ExtensionManager:
     def __init__(self, ctx):
-        from extensions.discord import DiscordStream
         self.ctx = ctx
         self.items: dict[str, Extension] = {}
         self.errors: dict[str, str] = {}
-        self._register(DiscordStream)
+        for module, name in BUILTIN:
+            self._load_builtin(module, name)
         self.load_user_folder()
+
+    def _load_builtin(self, module: str, name: str) -> None:
+        """Eine kaputte eingebaute Erweiterung darf die anderen und PopWin nicht aufhalten."""
+        try:
+            self._register(getattr(importlib.import_module(module), name))
+        except Exception as exc:
+            log.warning("Erweiterung %s nicht geladen: %s", name, exc)
+            self.errors[module] = str(exc)
 
     def _register(self, cls) -> None:
         extension = cls(self.ctx)

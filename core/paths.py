@@ -26,6 +26,7 @@ SCRIPTS = {
     "terminal": "terminal/app.py",
     "studio": "studio/app.py",
     "stream": "stream/app.py",
+    "tts_for_windows": "tts/app.py",  # [Antigravity]
     "watchdog": "core/taskbar_watchdog.py",
     "nova_tool": "core/nova_tool_runner.py",
 }

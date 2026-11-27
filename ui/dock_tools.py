@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QPropertyAnimation, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QHBoxLayout, QWidget
 
+from ui.animation import animation_duration
 from ui.base import ThemedWindow
 
 TOOL_ITEMS = {"start": "Home-Knopf", "search": "Suche", "media": "Player", "nova": "Nova", "trash": "Papierkorb",
@@ -65,6 +66,7 @@ class ToolRow(ThemedWindow):
         outer.addWidget(self.frame)
         self._linger_until = 0.0
         self.fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self.fade.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.fade.setDuration(FADE_MS)
         self.fade.finished.connect(self._fade_done)
         self.timer = QTimer(self, interval=100)
@@ -129,9 +131,20 @@ class ToolRow(ThemedWindow):
             self.fade.setEndValue(0.0)
             self.hide()
             return
+        duration = animation_duration(self.ctx.config.get("animations"), scale=0.55, max_reduced=60)
+        if duration <= 0:
+            self.fade.setEndValue(value)
+            if value <= 0.0:
+                self.hide()
+            else:
+                self.setWindowOpacity(value)
+                if not self.isVisible():
+                    self.show()
+            return
         if not self.isVisible():
             self.setWindowOpacity(0.0)
             self.show()
+        self.fade.setDuration(duration)
         self.fade.setStartValue(self.windowOpacity())
         self.fade.setEndValue(value)
         self.fade.start()

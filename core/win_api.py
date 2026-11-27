@@ -7,6 +7,8 @@ import logging
 import os
 import re
 import subprocess
+import sys
+import threading
 import time
 import uuid
 import winreg
@@ -69,6 +71,8 @@ user32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
 user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
 user32.EnumChildWindows.argtypes = (wintypes.HWND, WNDENUMPROC, wintypes.LPARAM)
 user32.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
+user32.SendInput.argtypes = (wintypes.UINT, ctypes.c_void_p, ctypes.c_int)
+user32.SendInput.restype = wintypes.UINT
 user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
 user32.MonitorFromWindow.restype = wintypes.HMONITOR
 user32.GetMonitorInfoW.argtypes = (wintypes.HMONITOR, ctypes.c_void_p)
@@ -95,6 +99,11 @@ ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 WCA_ACCENT_POLICY = 19
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_DONOTROUND, DWMWCP_ROUND = 1, 2
+DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+DWMWA_BORDER_COLOR = 34
+DWMWA_CAPTION_COLOR = 35
+DWMWA_COLOR_DEFAULT = 0xFFFFFFFF
 
 
 def _abgr(rgba_hex: str) -> int:
@@ -118,8 +127,35 @@ def set_rounded(hwnd: int, rounded: bool) -> None:
     dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(pref), ctypes.sizeof(pref))
 
 
+def _bgr(rgb_hex: str) -> int:
+    """#RRGGBB -> 0x00BBGGRR (COLORREF für DWMWA_CAPTION_COLOR)."""
+    value = rgb_hex.lstrip("#")[:6]
+    if len(value) != 6:
+        return DWMWA_COLOR_DEFAULT
+    r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+    return (b << 16) | (g << 8) | r
+
+
+def set_dark_titlebar(hwnd: int, dark: bool, caption_hex: str = "") -> None:
+    """Schaltet die native Windows-Titelleiste dunkel/hell und setzt unter Win11 optional ihre Farbe."""
+    if not hwnd:
+        return
+    try:
+        flag = wintypes.BOOL(1 if dark else 0)
+        res = dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(flag), ctypes.sizeof(flag))
+        if res != 0:
+            dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, ctypes.byref(flag), ctypes.sizeof(flag))
+        color = wintypes.DWORD(_bgr(caption_hex) if caption_hex else DWMWA_COLOR_DEFAULT)
+        dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(color), ctypes.sizeof(color))
+    except Exception:
+        pass
+
+
 HWND_TOP, HWND_BOTTOM, HWND_TOPMOST, HWND_NOTOPMOST = 0, 1, -1, -2
-SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE, SWP_HIDEWINDOW = 0x1, 0x2, 0x4, 0x10, 0x80
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE, SWP_HIDEWINDOW, SWP_ASYNCWINDOWPOS = 0x1, 0x2, 0x4, 0x10, 0x80, 0x4000
 
 
 def place_window(hwnd: int, x: int, y: int, w: int, h: int) -> None:
@@ -202,8 +238,22 @@ def monitor_numbers() -> dict[tuple[int, int, int, int], int]:
     return rank_monitors(devices)
 
 
+_monitor_rects_cache: list[tuple[int, int, int, int]] = []
+_monitor_rects_time = 0.0
+_MONITOR_CACHE_TTL = 0.5
+
+
+def invalidate_monitor_cache() -> None:
+    global _monitor_rects_time
+    _monitor_rects_time = 0.0
+
+
 def monitor_rects() -> list[tuple[int, int, int, int]]:
     """Alle Monitore in echten Pixeln als (links, oben, rechts, unten)."""
+    global _monitor_rects_cache, _monitor_rects_time
+    now = time.monotonic()
+    if now - _monitor_rects_time < _MONITOR_CACHE_TTL and _monitor_rects_cache:
+        return list(_monitor_rects_cache)
     rects: list[tuple[int, int, int, int]] = []
 
     def callback(_hmon, _hdc, rect, _lparam):
@@ -212,7 +262,9 @@ def monitor_rects() -> list[tuple[int, int, int, int]]:
         return True
 
     user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(callback), 0)
-    return rects
+    _monitor_rects_cache = rects
+    _monitor_rects_time = now
+    return list(_monitor_rects_cache)
 
 
 def work_areas() -> list[tuple[int, int, int, int]]:
@@ -376,13 +428,18 @@ def hide_native_taskbar() -> None:
     reinforce_taskbar_hidden()
 
 
-def reinforce_taskbar_hidden() -> None:
+def reinforce_taskbar_hidden() -> bool:
     """Der Explorer blendet Zweitleisten nach dem Wechsel auf Auto-Hide noch einmal ein -
     deshalb muss nachgefasst werden, ohne den Zustand erneut zu setzen."""
+    changed = False
     for hwnd in _native_taskbars():
         if user32.IsWindowVisible(hwnd):
-            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0,
-                                SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+            user32.SetWindowPos(
+                hwnd, None, 0, 0, 0, 0,
+                SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            )
+            changed = True
+    return changed
 
 
 def native_taskbar_visible() -> bool:
@@ -396,6 +453,62 @@ def show_native_taskbar(saved_state: int | None = None) -> None:
     # Versteckte Zweitleisten kommen sonst im hellen Design zurück, auch wenn Dark Mode an ist.
     time.sleep(0.2)
     broadcast_setting_change("ImmersiveColorSet")
+    # Hat Windows die Zweitleisten beim Anmelden gar nicht erst gebaut (siehe suppress_secondary_taskbars), baut es sie jetzt.
+    broadcast_setting_change("TraySettings")
+
+
+# --- Zweitleisten beim Anmelden ----------------------------------------------
+# Windows zeigt nach dem Anmelden auf den anderen Monitoren kurz seine Taskleiste, bevor PopWin sie ausblenden kann.
+# Beim Abmelden schaltet PopWin deshalb „Taskleiste auf allen Bildschirmen“ ab: Der Explorer baut sie dann gar nicht erst.
+# Sobald PopWin wieder läuft, steht die Einstellung wieder wie vorher, nur eben ohne aufzublitzen.
+_ADVANCED_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+_MM_VALUE = "MMTaskbarEnabled"
+POPWIN_KEY = r"Software\PopWin"
+SAVED_MM_VALUE = "SavedMMTaskbarEnabled"
+MM_WAS_MISSING = 2  # der Wert fehlte, Windows nimmt dann „an“
+
+
+def suppress_secondary_taskbars() -> bool:
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, POPWIN_KEY) as own:
+            try:
+                winreg.QueryValueEx(own, SAVED_MM_VALUE)
+                return True  # schon gemerkt, der echte Wert steht dort
+            except OSError:
+                pass
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _ADVANCED_KEY) as advanced:
+                try:
+                    current = int(winreg.QueryValueEx(advanced, _MM_VALUE)[0])
+                except (OSError, ValueError, TypeError):
+                    current = MM_WAS_MISSING
+                if current == 0:
+                    return False  # schon aus: gehört dem Nutzer, nichts zu merken
+                winreg.SetValueEx(own, SAVED_MM_VALUE, 0, winreg.REG_DWORD, current)
+                winreg.SetValueEx(advanced, _MM_VALUE, 0, winreg.REG_DWORD, 0)
+        return True
+    except OSError:
+        return False
+
+
+def restore_secondary_taskbars(notify: bool) -> bool:
+    """Stellt den gemerkten Wert zurück. notify baut die Zweitleisten sofort, sonst erst beim nächsten Einblenden."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, POPWIN_KEY, 0, winreg.KEY_ALL_ACCESS) as own:
+            saved = int(winreg.QueryValueEx(own, SAVED_MM_VALUE)[0])
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _ADVANCED_KEY) as advanced:
+                if saved == MM_WAS_MISSING:
+                    try:
+                        winreg.DeleteValue(advanced, _MM_VALUE)
+                    except OSError:
+                        pass
+                else:
+                    winreg.SetValueEx(advanced, _MM_VALUE, 0, winreg.REG_DWORD, saved)
+            winreg.DeleteValue(own, SAVED_MM_VALUE)
+    except (OSError, ValueError, TypeError):
+        return False
+    if notify:
+        broadcast_setting_change("TraySettings")
+    return True
 
 
 # --- Hell/Dunkel -------------------------------------------------------------
@@ -490,10 +603,12 @@ def empty_recycle_bin(hwnd: int = 0) -> bool:
 
 # --- Fenster -----------------------------------------------------------------
 GWL_STYLE, GWL_EXSTYLE, GWLP_HWNDPARENT = -16, -20, -8
+WS_VISIBLE = 0x10000000
 WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE = 0x8, 0x80, 0x40000, 0x08000000
 GW_OWNER = 4
 DWMWA_CLOAKED = 14
-WM_CLOSE, WM_COMMAND, WM_GETICON = 0x0010, 0x0111, 0x007F
+WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_GETICON = 0x0006, 0x0010, 0x0111, 0x007F
+WA_INACTIVE, BM_CLICK = 0, 0x00F5
 GCLP_HICON, GCLP_HICONSM = -14, -34
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
@@ -607,8 +722,19 @@ def _main_process(exe: str, pid: int) -> tuple[str, int]:
 
 
 _popwin_apps: dict[int, str] = {}
-INTERNAL_APPS = ("settings", "widgets", "dev")  # [Antigravity: dev ergänzt]
+INTERNAL_APPS = ("settings", "widgets")
 _POPWIN_ROOT = str(Path(__file__).resolve().parent.parent).lower()
+
+
+_SCRIPT_APPS = {  # [Antigravity]
+    "explorer\\app.py": "explorer",
+    "editor\\app.py": "editor",
+    "terminal\\app.py": "terminal",
+    "studio\\app.py": "studio",
+    "stream\\app.py": "stream",
+    "tts\\app.py": "tts_for_windows",
+    "extensions\\tts_for_windows.py": "tts_for_windows",
+}
 
 
 def popwin_app_of(arguments: list[str]) -> str:
@@ -617,9 +743,11 @@ def popwin_app_of(arguments: list[str]) -> str:
         return arguments[1]
     for argument in arguments:
         path = argument.lower().replace("/", "\\")
-        for app in ("explorer", "editor", "terminal", "studio", "stream"):
-            if path == f"{_POPWIN_ROOT}\\{app}\\app.py":
+        # --- [Antigravity Start] Sub-Apps inkl. tts/app.py als tts_for_windows erkennen ---
+        for suffix, app in _SCRIPT_APPS.items():
+            if path == f"{_POPWIN_ROOT}\\{suffix}":
                 return app
+        # --- [Antigravity Ende] ---
     return ""
 
 
@@ -631,7 +759,7 @@ def _popwin_app(exe: str, pid: int) -> str:
         try:
             _popwin_apps[pid] = popwin_app_of(psutil.Process(pid).cmdline()[1:])
         except psutil.Error:
-            return ""
+            _popwin_apps[pid] = ""
     return _popwin_apps[pid]
 
 
@@ -660,10 +788,22 @@ def is_web_app_id(app_id: str) -> bool:
     return "!" in app_id or "_crx_" in app_id.lower()
 
 
+_propsys_mods: tuple | None | bool = None
+
+
 def window_app_id(hwnd: int) -> str:
     """Die AppUserModelID, die ein Fenster selbst setzt; Store-Apps und viele Programme tun das."""
+    global _propsys_mods
+    if _propsys_mods is None:
+        try:
+            from win32com.propsys import propsys, pscon
+            _propsys_mods = (propsys, pscon)
+        except Exception:
+            _propsys_mods = False
+    if not _propsys_mods:
+        return ""
+    propsys, pscon = _propsys_mods
     try:
-        from win32com.propsys import propsys, pscon
         return propsys.SHGetPropertyStoreForWindow(hwnd, propsys.IID_IPropertyStore).GetValue(pscon.PKEY_AppUserModel_ID).GetValue() or ""
     except Exception:  # das Fenster kann gerade verschwunden sein
         return ""
@@ -702,6 +842,24 @@ def is_host_exe(exe: str) -> bool:
     return os.path.basename(exe).lower() in HOST_EXES
 
 
+_hwnd_meta_cache: dict[tuple[int, int], tuple[str, int, str]] = {}
+# Viele Programme setzen ihre AppUserModelID erst nach dem Anzeigen (PWAs, Electron, Terminal) - nur kurz merken.
+_hwnd_aumid_cache: dict[tuple[int, int], tuple[str, float]] = {}
+AUMID_TTL_EMPTY_S = 2.0
+AUMID_TTL_S = 10.0
+
+
+def _cached_app_id(key: tuple[int, int], hwnd: int, now: float) -> str:
+    cached = _hwnd_aumid_cache.get(key)
+    if cached is not None:
+        aumid, read_at = cached
+        if now - read_at < (AUMID_TTL_S if aumid else AUMID_TTL_EMPTY_S):
+            return aumid
+    aumid = window_app_id(hwnd)
+    _hwnd_aumid_cache[key] = (aumid, now)
+    return aumid
+
+
 def list_windows() -> list[WindowInfo]:
     """Die Fenster, die auch die normale Taskleiste zeigen würde."""
     hwnds: list[int] = []
@@ -713,13 +871,35 @@ def list_windows() -> list[WindowInfo]:
 
     user32.EnumWindows(WNDENUMPROC(callback), 0)
     own = os.getpid()
-    result = []
+    result: list[WindowInfo] = []
+    seen_keys: set[tuple[int, int]] = set()
+    live_pids: set[int] = set()
+    now = time.monotonic()
     for hwnd in hwnds:
         pid = _pid(hwnd)
         if pid != own:
-            exe, app_pid = _main_process(_real_exe(hwnd, pid), pid)
-            aumid = window_app_id(hwnd)
-            result.append(WindowInfo(hwnd, window_title(hwnd), exe, pid, app_pid, _popwin_app(exe, pid), web_app_id(exe, aumid), aumid))
+            key = (hwnd, pid)
+            seen_keys.add(key)
+            live_pids.add(pid)
+            meta = _hwnd_meta_cache.get(key)
+            if meta is None:
+                real = _real_exe(hwnd, pid)
+                exe, app_pid = _main_process(real, pid)
+                pop_app = _popwin_app(exe, pid)
+                meta = (exe, app_pid, pop_app)
+                if (not real.lower().endswith("applicationframehost.exe")
+                        and not exe.lower().endswith("applicationframehost.exe")):
+                    _hwnd_meta_cache[key] = meta
+            else:
+                exe, app_pid, pop_app = meta
+            aumid = _cached_app_id(key, hwnd, now)
+            result.append(WindowInfo(hwnd, window_title(hwnd), exe, pid, app_pid, pop_app, web_app_id(exe, aumid), aumid))
+    for cache in (_hwnd_meta_cache, _hwnd_aumid_cache):
+        for stale in [k for k in cache if k not in seen_keys]:
+            del cache[stale]
+    for cache in (_main_processes, _popwin_apps):
+        for stale in [p for p in cache if p not in live_pids]:
+            del cache[stale]
     return result
 
 
@@ -785,6 +965,10 @@ def _fills(hwnd: int, monitor: tuple[int, int, int, int]) -> bool:
     return is_fullscreen_rect(window_rect(hwnd), monitor, bool(user32.IsZoomed(hwnd)))
 
 
+def _is_fullscreen_candidate(hwnd: int) -> bool:
+    return bool(hwnd) and bool(user32.IsWindowVisible(hwnd)) and not bool(user32.IsIconic(hwnd))
+
+
 WS_EX_LAYERED_STYLE, WS_EX_TRANSPARENT_STYLE = 0x80000, 0x20
 _last_game: dict[tuple[int, int, int, int], int] = {}  # Monitor -> zuletzt gesehenes Vollbild-Fenster
 
@@ -795,11 +979,13 @@ def fullscreen_window(monitor: tuple[int, int, int, int]) -> int:
     Nicht nur das aktive Fenster zählt: Mit Discord im Vollbild auf Monitor 2 kann man auf Monitor 1 arbeiten.
     """
     hwnd = user32.GetForegroundWindow()
-    if _counts_for_fullscreen(hwnd) and _fills(hwnd, monitor):
+    if _is_fullscreen_candidate(hwnd) and not _is_cloaked(hwnd) and _counts_for_fullscreen(hwnd) and _fills(hwnd, monitor):
         return hwnd
     found = [0]
 
     def callback(candidate, _lparam):  # EnumWindows liefert von oben nach unten
+        if not user32.IsWindowVisible(candidate) or user32.IsIconic(candidate):
+            return True
         if not _counts_for_fullscreen(candidate) or not _is_task_window(candidate) or is_overlay(candidate):
             return True
         # Nach der Mitte: Maximierte Fenster ragen 8 px auf den Nachbarmonitor und verdeckten dort sonst das Spiel
@@ -835,6 +1021,130 @@ def fullscreen_on(monitor: tuple[int, int, int, int]) -> bool:
         return True
     _last_game.pop(monitor, None)
     return False
+
+
+def fullscreen_present(monitor: tuple[int, int, int, int]) -> bool:
+    """Liegt auf diesem Monitor irgendwo ein Vollbild-Fenster, auch verdeckt hinter einem anderen Fenster?
+
+    fullscreen_on sieht nur das oberste. Nimmt sich eine Leiste aber Platz, passt Windows jedes Fenster neu ein,
+    das sich als maximiert meldet, auch ein verdecktes Spiel (Valorant). Es rutschte unter die Topbar."""
+    found = [False]
+
+    def callback(candidate, _lparam):
+        if not user32.IsWindowVisible(candidate) or user32.IsIconic(candidate) or _is_cloaked(candidate):
+            return True
+        if not _counts_for_fullscreen(candidate) or not _is_task_window(candidate) or is_overlay(candidate):
+            return True
+        if contains_center(window_rect(candidate), monitor) and _fills(candidate, monitor):
+            found[0] = True
+            return False
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    return found[0] or game_waits(_last_game.get(monitor, 0))
+
+
+def desktop_covered(monitor: tuple[int, int, int, int]) -> bool:
+    """Verdeckt ein maximiertes oder Vollbild-Fenster den Desktop auf diesem Monitor? Dann sieht niemand den Hintergrund."""
+    found = [False]
+
+    def callback(candidate, _lparam):
+        if not _counts_for_fullscreen(candidate) or not _is_task_window(candidate) or is_overlay(candidate):
+            return True
+        if user32.IsIconic(candidate):
+            return True
+        rect = window_rect(candidate)
+        if contains_center(rect, monitor) and (user32.IsZoomed(candidate) or _fills(candidate, monitor)):
+            found[0] = True
+            return False
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    return found[0]
+
+
+BELOW_NORMAL_PRIORITY = 0x4000
+kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+kernel32.SetProcessWorkingSetSize.argtypes = (wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t)
+
+
+def set_low_priority() -> None:
+    """Der eigene Prozess tritt hinter allem anderen zurück (Priorität „Niedriger als normal“)."""
+    kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), BELOW_NORMAL_PRIORITY)
+
+
+def trim_working_set() -> None:
+    """Gibt den gerade nicht gebrauchten Arbeitsspeicher des eigenen Prozesses an Windows zurück."""
+    kernel32.SetProcessWorkingSetSize(kernel32.GetCurrentProcess(), ctypes.c_size_t(-1).value, ctypes.c_size_t(-1).value)
+
+
+def window_work_area(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Der Arbeitsbereich (ohne Leisten) des Monitors, auf dem das Fenster liegt."""
+    info = MONITORINFOEXW()
+    info.cbSize = ctypes.sizeof(info)
+    if user32.GetMonitorInfoW(_monitor_handle(hwnd), ctypes.byref(info)):
+        r = info.rcWork
+        return r.left, r.top, r.right, r.bottom
+    return None
+
+
+SW_MAXIMIZE = 3
+
+
+def tile_window(hwnd: int, place: str) -> None:
+    """Legt ein Fenster an eine Hälfte oder ein Viertel seines Monitors, oder maximiert es, und holt es nach vorn."""
+    from core.window_tiles import MAXIMIZE, tile_rect
+    if not user32.IsWindow(hwnd):
+        return
+    if place == MAXIMIZE:
+        user32.ShowWindow(hwnd, SW_MAXIMIZE)
+    else:
+        area = window_work_area(hwnd)
+        if area is None:
+            return
+        if user32.IsIconic(hwnd) or user32.IsZoomed(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)  # ein maximiertes Fenster lässt sich nicht verschieben
+        place_window(hwnd, *tile_rect(area, place))
+    activate_window(hwnd)
+
+
+def fullscreen_monitors(monitors: list[tuple[int, int, int, int]]) -> dict[tuple[int, int, int, int], bool]:
+    """Wie fullscreen_on, aber für mehrere Monitore in einem einzigen EnumWindows-Durchlauf (spart Last auf schwachen PCs)."""
+    unique = list(dict.fromkeys(monitors))
+    games: dict[tuple[int, int, int, int], int] = {m: 0 for m in unique}
+    pending = set(unique)
+    fg = user32.GetForegroundWindow()
+    if pending and _is_fullscreen_candidate(fg) and not _is_cloaked(fg) and _counts_for_fullscreen(fg):
+        for m in list(pending):
+            if _fills(fg, m):
+                games[m] = fg
+                pending.discard(m)
+    if pending:
+        def callback(candidate, _lparam):  # EnumWindows liefert von oben nach unten
+            if not user32.IsWindowVisible(candidate) or user32.IsIconic(candidate):
+                return True
+            if not _counts_for_fullscreen(candidate) or not _is_task_window(candidate) or is_overlay(candidate):
+                return True
+            rect = window_rect(candidate)
+            matched = [m for m in pending if contains_center(rect, m)]
+            for m in matched:
+                games[m] = candidate if _fills(candidate, m) else 0
+                pending.discard(m)
+            return bool(pending)
+
+        user32.EnumWindows(WNDENUMPROC(callback), 0)
+    result: dict[tuple[int, int, int, int], bool] = {}
+    for m, game in games.items():
+        if game:
+            _last_game[m] = game
+            result[m] = True
+        elif game_waits(_last_game.get(m, 0)):
+            result[m] = True
+        else:
+            _last_game.pop(m, None)
+            result[m] = False
+    return result
 
 
 def is_topmost(hwnd: int) -> bool:
@@ -905,8 +1215,8 @@ def thumbnail_unregister(handle: int) -> None:
 
 
 def foreground_title() -> str:
-    import pygetwindow
-    return pygetwindow.getActiveWindowTitle() or ""
+    hwnd = user32.GetForegroundWindow()
+    return window_title(hwnd) if hwnd else ""
 
 
 def activate_window(hwnd: int) -> None:
@@ -917,6 +1227,22 @@ def activate_window(hwnd: int) -> None:
     if user32.IsWindow(hwnd) and user32.GetForegroundWindow() != hwnd:
         user32.SwitchToThisWindow(hwnd, True)
     # --- [Antigravity Ende] ---
+
+
+def activate_for_drop(hwnd: int) -> None:
+    """Holt ein Fenster nach vorn, während ein anderes Programm gerade etwas zieht (Hinhalten über der Taskbar).
+    Ohne AttachThreadInput: Das koppelte PopWin an den Thread, der zieht, und der Drag könnte dabei abbrechen."""
+    if not user32.IsWindow(hwnd):
+        return
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+    if user32.GetForegroundWindow() == hwnd:
+        return
+    send_keys(VK_DUMMY)  # nach einer eigenen Eingabe erlaubt Windows den Wechsel in den Vordergrund
+    user32.BringWindowToTop(hwnd)
+    user32.SetForegroundWindow(hwnd)
+    if user32.GetForegroundWindow() != hwnd:
+        user32.SwitchToThisWindow(hwnd, True)
 
 
 def is_minimized(hwnd: int) -> bool:
@@ -934,7 +1260,7 @@ def close_window(hwnd: int) -> None:
 def window_hicon(hwnd: int) -> int:
     result = ctypes.c_size_t(0)
     for icon_type in (1, 0):  # ICON_BIG, ICON_SMALL
-        if user32.SendMessageTimeoutW(hwnd, WM_GETICON, icon_type, 0, SMTO_ABORTIFHUNG, 50,
+        if user32.SendMessageTimeoutW(hwnd, WM_GETICON, icon_type, 0, SMTO_ABORTIFHUNG, 25,
                                       ctypes.byref(result)) and result.value:
             return result.value
     return user32.GetClassLongPtrW(hwnd, GCLP_HICON) or user32.GetClassLongPtrW(hwnd, GCLP_HICONSM)
@@ -1125,6 +1451,37 @@ def watch_foreground(callback) -> int:
                                       WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS) or 0)
 
 
+EVENT_OBJECT_DESTROY, EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE = 0x8001, 0x8002, 0x8003
+OBJID_WINDOW, CHILDID_SELF = 0, 0
+
+
+def window_change_relevant(event: int, hwnd: int, obj: int, child: int, known) -> bool:
+    """Nur Hauptfenster zählen. Zu oder versteckt: nur, wenn die Taskbar es gerade zeigt (das Fenster gibt es ja nicht mehr).
+    Neu sichtbar: nur, was auch auf eine Taskleiste gehört - Menüs und Tooltips erscheinen ständig."""
+    if obj != OBJID_WINDOW or child != CHILDID_SELF or not hwnd:
+        return False
+    if event in (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE):
+        return hwnd in known()
+    return event == EVENT_OBJECT_SHOW and user32.GetAncestor(hwnd, GA_ROOT) == hwnd and _is_task_window(hwnd)
+
+
+def watch_window_changes(callback, known) -> int:
+    """Ruft `callback()` im Hauptthread, sobald ein Taskbar-Fenster aufgeht, zugeht oder verschwindet.
+    So verschwindet ein geschlossenes Programm sofort aus der Taskbar, statt erst beim nächsten Nachsehen.
+    `known()` liefert die Kennungen der Fenster, die die Taskbar gerade zeigt."""
+    def on_event(_hook, event, hwnd, obj, child, _thread, _time):
+        try:
+            if window_change_relevant(int(event), int(hwnd or 0), int(obj), int(child), known):
+                callback()
+        except Exception:  # ein Fehler hier darf nie bis in Windows durchschlagen
+            log.exception("Fensterwechsel")
+
+    proc = WINEVENTPROC(on_event)
+    _event_procs.append(proc)
+    return int(user32.SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, None, proc, 0, 0,
+                                      WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS) or 0)
+
+
 @functools.lru_cache(maxsize=256)  # die Taskbar fragt das bei jeder Aktualisierung, das Manifest ändert sich nie
 def packaged_app_target(exe: str) -> str:
     """Store-Apps tragen ihr Logo im Paket, die .exe hat oft nur das leere Standardsymbol. Liefert ihren Eintrag im App-Ordner."""
@@ -1230,9 +1587,30 @@ def desktop_path() -> Path:
 
 
 # --- Tasten, Programme, Energie -------------------------------------------------
-KEYEVENTF_KEYUP = 0x2
-VK_LWIN, VK_CONTROL, VK_LEFT, VK_RIGHT, VK_TAB, VK_B, VK_RETURN = 0x5B, 0x11, 0x25, 0x27, 0x09, 0x42, 0x0D
+KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP = 0x0001, 0x2
+VK_LWIN, VK_RWIN, VK_CONTROL, VK_LEFT, VK_RIGHT, VK_TAB, VK_B, VK_RETURN = 0x5B, 0x5C, 0x11, 0x25, 0x27, 0x09, 0x42, 0x0D
 VK_ESCAPE = 0x1B
+INPUT_KEYBOARD = 1
+POPWIN_SYNTH_EXTRA_INFO = 0x504F5057
+_EXTENDED_VKS = frozenset({VK_LWIN, VK_RWIN, VK_LEFT, VK_RIGHT, 0x26, 0x28, 0x21, 0x22, 0x23, 0x24, 0x2D, 0x2E})
+
+
+class _MouseInput(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _KeyInput(ctypes.Structure):
+    _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _InputUnion(ctypes.Union):
+    _fields_ = [("mi", _MouseInput), ("ki", _KeyInput)]
+
+
+class _Input(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("u", _InputUnion)]
 
 
 def toggle_desktop() -> None:
@@ -1247,24 +1625,237 @@ def send_keys(*keys: int) -> None:
         user32.keybd_event(key, 0, KEYEVENTF_KEYUP, 0)
 
 
-def open_tray_overflow() -> None:
-    """Win+B fokussiert den Infobereich, Enter klappt die versteckten Symbole aus."""
+def _key_input(key: int, flags: int = 0) -> _Input:
+    if key in _EXTENDED_VKS:
+        flags |= KEYEVENTF_EXTENDEDKEY
+    return _Input(INPUT_KEYBOARD, _InputUnion(ki=_KeyInput(key, 0, flags, 0, POPWIN_SYNTH_EXTRA_INFO)))
+
+
+def send_internal_keys(*keys: int) -> None:
+    """Sendet interne Tastenkürzel per SendInput mit Markierung, damit ShellHooks sie durchlässt."""
+    if not keys:
+        return
+    events = [_key_input(key) for key in keys]
+    events += [_key_input(key, KEYEVENTF_KEYUP) for key in reversed(keys)]
+    array = (_Input * len(events))(*events)
+    user32.SendInput(len(events), array, ctypes.sizeof(_Input))
+
+
+_tray_uia_lock = threading.Lock()
+
+
+def _find_classic_tray_chevron() -> int:
+    tray = user32.FindWindowW("Shell_TrayWnd", None)
+    if not tray:
+        return 0
+    notify = user32.FindWindowExW(tray, None, "TrayNotifyWnd", None)
+    if not notify:
+        return 0
+    seen: set[int] = set()
+    btn = None
+    while True:
+        btn = user32.FindWindowExW(notify, btn, "Button", None)
+        if not btn or btn in seen:
+            return 0
+        seen.add(btn)
+        if (class_name(btn) == "Button"
+                and user32.GetParent(btn) == notify
+                and (user32.GetWindowLongPtrW(btn, GWL_STYLE) & WS_VISIBLE) != 0):
+            return btn
+
+
+def _click_classic_tray_chevron() -> bool:
+    btn = _find_classic_tray_chevron()
+    return bool(btn and user32.PostMessageW(btn, BM_CLICK, 0, 0))
+
+
+def _invoke_uia_element(target, uia) -> bool:
+    for pattern_id, iface_name, method_name in (
+        (uia.UIA_InvokePatternId, "IUIAutomationInvokePattern", "Invoke"),
+        (uia.UIA_TogglePatternId, "IUIAutomationTogglePattern", "Toggle"),
+        (uia.UIA_LegacyIAccessiblePatternId, "IUIAutomationLegacyIAccessiblePattern", "DoDefaultAction"),
+    ):
+        pattern = None
+        try:
+            pattern = target.GetCurrentPattern(pattern_id)
+            if not pattern:
+                continue
+            if not hasattr(pattern, method_name):
+                iface = getattr(uia, iface_name, None)
+                if iface is not None and hasattr(pattern, "QueryInterface"):
+                    pattern = pattern.QueryInterface(iface)
+            getattr(pattern, method_name)()
+            return True
+        except Exception:
+            continue
+        finally:
+            pattern = None
+    return False
+
+
+def _invoke_win11_tray_chevron() -> bool:
+    tray = user32.FindWindowW("Shell_TrayWnd", None)
+    if not tray:
+        return False
+    import comtypes
+    import comtypes.client
+
+    com_init = False
+    automation = root = cond = elem = walker = parent = None
+    try:
+        comtypes.CoInitialize()
+        com_init = True
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen import UIAutomationClient as uia
+
+        automation = comtypes.client.CreateObject(uia.CUIAutomation, interface=uia.IUIAutomation)
+        root = automation.ElementFromHandle(tray)
+        if not root:
+            return False
+        cond = automation.CreatePropertyCondition(uia.UIA_ClassNamePropertyId, "SystemTray.ChevronIconView")
+        elem = root.FindFirst(uia.TreeScope_Descendants, cond)
+        if not elem:
+            return False
+        if (elem.CurrentClassName or "") != "SystemTray.ChevronIconView":
+            return False
+        if "start" in (elem.CurrentAutomationId or "").lower():
+            return False
+        if _invoke_uia_element(elem, uia):
+            return True
+        walker = automation.ControlViewWalker
+        parent = walker.GetParentElement(elem)
+        if parent:
+            parent_cls = parent.CurrentClassName or ""
+            parent_aid = parent.CurrentAutomationId or ""
+            if parent_cls.startswith("SystemTray.") and "start" not in parent_aid.lower():
+                return _invoke_uia_element(parent, uia)
+        return False
+    except Exception as exc:
+        log.debug("Win11-Tray-Chevron nicht aufrufbar: %s", exc)
+        return False
+    finally:
+        # Kein gc.collect(): Das würde Python-Zyklen im ganzen Programm abräumen, auch Qt-Objekte,
+        # und die dürfen nur im GUI-Thread zerstört werden. Die eigenen COM-Referenzen sind hier schon gelöst.
+        parent = walker = elem = cond = root = automation = None
+        if com_init:
+            comtypes.CoUninitialize()
+
+
+TRAY_OPEN_CONFIRM_S = 0.4
+TRAY_OPEN_POLL_S = 0.025
+
+
+def _is_win11() -> bool:
+    try:
+        return sys.getwindowsversion().build >= 22000
+    except Exception:
+        return False
+
+
+def _wait_tray_overflow(timeout: float = TRAY_OPEN_CONFIRM_S) -> bool:
+    """Wartet kurz, ob der Überlauf wirklich erscheint. PostMessage meldet immer Erfolg, auch wenn nichts passiert."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if tray_overflow_window():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(TRAY_OPEN_POLL_S)
+
+
+def _press_tray_keys() -> bool:
+    """Win+B fokussiert den Infobereich, Enter klappt die versteckten Symbole aus (wie in 3.8.5)."""
     send_keys(VK_LWIN, VK_B)
     time.sleep(0.08)
     send_keys(VK_RETURN)
+    return True
+
+
+def _open_tray_overflow_worker() -> bool:
+    """Beide Wege nacheinander, mit Prüfung: Windows 11 zuerst über UI Automation, Windows 10 zuerst klassisch.
+    Nie eine Enter-Taste - die landete früher auf dem Start-Knopf."""
+    win11 = _is_win11()
+    attempts = (_invoke_win11_tray_chevron, _click_classic_tray_chevron)
+    if not win11:
+        attempts = attempts[::-1]
+    # Zuerst der Weg aus 3.8.5, der auf dem Haupt-PC zuverlässig lief: Win+B fokussiert den Pfeil, Enter klappt ihn auf.
+    attempts = (_press_tray_keys, *attempts)
+    for attempt in attempts:
+        if tray_overflow_window():
+            return True
+        try:
+            triggered = attempt()
+        except Exception as exc:
+            log.debug("Tray-Überlauf: %s fehlgeschlagen: %s", attempt.__name__, exc)
+            triggered = False
+        if triggered and _wait_tray_overflow():
+            return True
+    return bool(tray_overflow_window())
+
+
+_tray_busy_since = [0.0]
+TRAY_STUCK_S = 4.0  # länger läuft kein Versuch; hängt UI Automation, darf der nächste Klick trotzdem öffnen
+
+
+def _run_win11_tray_chevron(wait_timeout: float = 0.0, target=None) -> bool:
+    owns_lock = _tray_uia_lock.acquire(blocking=False)
+    if not owns_lock and time.monotonic() - _tray_busy_since[0] < TRAY_STUCK_S:
+        return False
+    if owns_lock:
+        _tray_busy_since[0] = time.monotonic()
+    result = [False]
+    action = target or _invoke_win11_tray_chevron
+
+    def worker() -> None:
+        try:
+            result[0] = action()
+        finally:
+            if owns_lock:
+                _tray_uia_lock.release()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    try:
+        thread.start()
+    except Exception:
+        if owns_lock:
+            _tray_uia_lock.release()
+        return False
+    if wait_timeout > 0:
+        thread.join(wait_timeout)
+    return result[0]
+
+
+def open_tray_overflow_async() -> None:
+    """Öffnet das Überlauf-Fenster des Infobereichs nicht-blockierend; Versuch und Rückfallweg laufen im Worker-Thread."""
+    _run_win11_tray_chevron(0.0, _open_tray_overflow_worker)
+
+
+def open_tray_overflow() -> bool:
+    """Öffnet das Überlauf-Fenster des Infobereichs und wartet höchstens ca. 2 s auf das Ergebnis."""
+    return _run_win11_tray_chevron(2.0, _open_tray_overflow_worker)
 
 
 def tray_overflow_window() -> int:
     """Das sichtbare Überlauf-Fenster des Infobereichs, sonst 0."""
     for cls in ("TopLevelWindowForOverflowXamlIsland", "NotifyIconOverflowWindow"):
         hwnd = user32.FindWindowW(cls, None)
-        if hwnd and user32.IsWindowVisible(hwnd):
-            return hwnd
+        if hwnd and user32.IsWindowVisible(hwnd) and not _is_cloaked(hwnd):
+            r = window_rect(hwnd)
+            if r[2] - r[0] > 0 and r[3] - r[1] > 0:
+                return hwnd
     return 0
 
 
 def close_tray_overflow() -> None:
-    send_keys(VK_ESCAPE)
+    hwnd = tray_overflow_window()
+    if not hwnd:
+        return
+    if user32.GetForegroundWindow() == hwnd:
+        send_internal_keys(VK_ESCAPE)
+        return
+    if class_name(hwnd) == "NotifyIconOverflowWindow" and _click_classic_tray_chevron():
+        return
+    user32.PostMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0)
 
 
 def window_rect(hwnd: int) -> tuple[int, int, int, int]:
@@ -1548,6 +2139,106 @@ def run_elevated(program: str, arguments: str) -> bool:
     return int(shell32.ShellExecuteW(None, "runas", program, arguments, None, 0) or 0) > 32
 
 
+# --- Schnellstart über die Aufgabenplanung -------------------------------------
+# Der Run-Eintrag kommt erst, wenn der Explorer fertig ist und Windows die Autostart-Programme freigibt
+# (gemessen: 37 s nach dem Anmelden). Eine Aufgabe „beim Anmelden“ startet sofort, braucht keine Adminrechte,
+# solange sie nur für das eigene Konto gilt, und läuft mit normaler statt niedriger Priorität.
+# Der Run-Eintrag bleibt als Rückfall; kommt er später dazu, sieht er den Mutex und beendet sich still.
+TASK_MARK_VALUE = "LogonTask"
+TASK_PRIORITY = 4  # wie ein normal gestartetes Programm; der Standard 7 bremst den Start
+
+
+def _task_user() -> str:
+    domain = os.environ.get("USERDOMAIN", "")
+    name = os.environ.get("USERNAME", "")
+    return f"{domain}\\{name}" if domain else name
+
+
+def logon_task_xml(program: str, arguments: str, user: str) -> str:
+    from xml.sax.saxutils import escape
+    folder = str(Path(arguments.strip().strip('"') or program).parent)
+    args = " ".join(part for part in (arguments, AUTOSTART_FLAG) if part)
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>PopWin direkt nach dem Anmelden starten</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{escape(user)}</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>{escape(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>{TASK_PRIORITY}</Priority>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>{escape(program)}</Command><Arguments>{escape(args)}</Arguments><WorkingDirectory>{escape(folder)}</WorkingDirectory></Exec></Actions>
+</Task>
+"""
+
+
+def _schtasks(*arguments: str) -> bool:
+    try:
+        return subprocess.run(["schtasks", *arguments], capture_output=True, timeout=15,
+                              creationflags=subprocess.CREATE_NO_WINDOW, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _task_mark() -> str:
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, POPWIN_KEY) as key:
+            return str(winreg.QueryValueEx(key, TASK_MARK_VALUE)[0])
+    except OSError:
+        return ""
+
+
+def _set_task_mark(value: str) -> None:
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, POPWIN_KEY) as key:
+            if value:
+                winreg.SetValueEx(key, TASK_MARK_VALUE, 0, winreg.REG_SZ, value)
+            else:
+                winreg.DeleteValue(key, TASK_MARK_VALUE)
+    except OSError:
+        pass
+
+
+def install_logon_task(program: str, arguments: str) -> bool:
+    import tempfile
+    xml = logon_task_xml(program, arguments, _task_user())
+    handle, path = tempfile.mkstemp(prefix="popwin_task_", suffix=".xml")
+    os.close(handle)
+    try:
+        Path(path).write_text(xml, encoding="utf-16")
+        done = _schtasks("/Create", "/TN", LOGON_TASK, "/XML", path, "/F")
+    finally:
+        Path(path).unlink(missing_ok=True)
+    _set_task_mark(autostart_command(program, arguments) if done else "")
+    if not done:
+        log.warning("Schnellstart-Aufgabe nicht anlegbar, es bleibt beim Run-Eintrag")
+    return done
+
+
+def remove_logon_task() -> None:
+    if _task_mark() or logon_task_exists():
+        _schtasks("/Delete", "/TN", LOGON_TASK, "/F")
+    _set_task_mark("")
+
+
+def ensure_logon_task(program: str, arguments: str) -> None:
+    """Bei jedem Start: Ist der Autostart an, soll auch die Aufgabe stehen und auf dieses PopWin zeigen."""
+    if not _run_value():
+        return
+    if _task_mark() == autostart_command(program, arguments) and logon_task_exists():
+        return
+    install_logon_task(program, arguments)
+
+
+def _in_background(job, *arguments) -> None:
+    """schtasks braucht ein paar hundert Millisekunden; die Oberfläche soll dabei nicht hängen."""
+    threading.Thread(target=job, args=arguments, daemon=True, name="PopWin-Autostart").start()
+
+
 def _write_shortcut(link: Path, program: str, arguments: str, icon: str = "") -> None:
     from win32com.client import Dispatch
     shortcut = Dispatch("WScript.Shell").CreateShortcut(str(link))
@@ -1572,6 +2263,10 @@ def set_autostart(enabled: bool, program: str, arguments: str) -> None:
             except OSError:
                 pass
     (clear_startup_delay if enabled else restore_startup_delay)()
+    if enabled:
+        _in_background(install_logon_task, program, arguments)
+    else:
+        _in_background(remove_logon_task)
     try:  # hat man es im Task-Manager einmal abgeschaltet, stünde dort noch die alte Sperre
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_APPROVED_KEY, 0, winreg.KEY_SET_VALUE) as key:
             winreg.DeleteValue(key, RUN_NAME)
@@ -1621,7 +2316,13 @@ def move_autostart_link(program: str, arguments: str) -> None:
     if _autostart_link().exists():
         set_autostart(True, program, arguments)
     elif _run_value():
-        clear_startup_delay()  # wer den Autostart schon vor diesem Update eingeschaltet hatte
+        # Zeigt der Eintrag auf eine andere Python-Umgebung (z. B. altes .venv im Projektordner,
+        # jetzt unter %LOCALAPPDATA%), wird er neu gesetzt; sonst startet der Autostart ins Leere.
+        if autostart_command(program, arguments) != _run_value():
+            set_autostart(True, program, arguments)
+        else:
+            clear_startup_delay()  # wer den Autostart schon vor diesem Update eingeschaltet hatte
+            _in_background(ensure_logon_task, program, arguments)  # wer ihn schon hatte, bekommt den Schnellstart dazu
 
 
 def start_menu_link() -> Path:
@@ -1695,7 +2396,7 @@ def virtual_desktops() -> tuple[int, int]:
 def switch_virtual_desktop(steps: int) -> None:
     arrow = VK_RIGHT if steps > 0 else VK_LEFT
     for _ in range(abs(steps)):
-        send_keys(VK_CONTROL, VK_LWIN, arrow)
+        send_internal_keys(VK_CONTROL, VK_LWIN, arrow)
         time.sleep(0.05)
 
 

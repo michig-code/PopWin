@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import random
 
-from PySide6.QtCore import QAbstractAnimation, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation
+from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import (QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
                            QRadialGradient)
 from PySide6.QtWidgets import QWidget
@@ -59,18 +59,29 @@ def paint_orb(painter: QPainter, colors: dict, angle: float) -> None:
 class NovaOrb(QWidget):
     """Der Ring mit dem Kern und dem kreisenden Punkt. Er läuft nur, solange man ihn sieht."""
 
-    def __init__(self):
+    def __init__(self, animated: bool = True):
         super().__init__()
         self.setFixedSize(ORB_SIZE, ORB_SIZE)
         self.colors = dict(NOVA_COLORS)
         self.busy = False
         self.phase = 1.0
         self.angle = 0.0
+        self._animated = bool(animated)
         self._timer = QTimer(self, interval=ORB_TICK)
         self._timer.timeout.connect(self._tick)
 
+    def set_animated(self, animated: bool) -> None:
+        self._animated = bool(animated)
+        if self._animated and self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self.phase = 1.0
+            self.update()
+
     def showEvent(self, event) -> None:
-        self._timer.start()
+        if self._animated:
+            self._timer.start()
         super().showEvent(event)
 
     def hideEvent(self, event) -> None:
@@ -103,6 +114,7 @@ class NovaSpawn(QWidget):
         self.sparks = [(pick.uniform(0, math.tau), pick.uniform(60, 190), pick.uniform(3.5, 6), pick.randrange(4))
                        for _ in range(SPARKS)]
         self._animation = QVariantAnimation(self)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._animation.setDuration(SPAWN_MS)
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
@@ -119,6 +131,12 @@ class NovaSpawn(QWidget):
         self.show()
         self._animation.stop()
         self._animation.start()
+
+    def stop(self) -> None:
+        self._animation.stop()
+        self.orb.phase = 1.0
+        self.orb.update()
+        self.hide()
 
     def _origin(self) -> QPointF:
         return QPointF(self.orb.mapTo(self.parentWidget(), self.orb.rect().center()))

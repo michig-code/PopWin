@@ -149,8 +149,17 @@ class TestClipboard:
     """Die Zwischenablage der Tests. Die echte teilt der unsichtbare Desktop mit der Sitzung des Nutzers: Ein Test
     überschrieb sonst, was der Nutzer gerade kopiert hatte, und scheiterte, wenn er währenddessen selbst kopierte."""
 
+    class _Signal:
+        """Ersatz für dataChanged: Der Zwischenablage-Verlauf hängt sich an, Tests lösen ihn nie aus."""
+        def connect(self, *_args):
+            pass
+
+        def disconnect(self, *_args):
+            pass
+
     def __init__(self):
         self.data = QMimeData()
+        self.dataChanged = self._Signal()
 
     def mimeData(self, *_mode):
         return self.data
@@ -182,6 +191,16 @@ for _name, _stub in (("appbar_register", lambda *a: None), ("appbar_remove", lam
                      ("force_foreground", lambda *a: None), ("set_zorder", lambda *a: None), ("move_desktop_icon", lambda *a: None),
                      ("desktop_command", lambda *a: None), ("send_keys", lambda *a: None), ("own_by_desktop", lambda *a: True),
                      ("shell_open", lambda *a: True), ("watch_foreground", lambda callback: 0)):  # kein Test startet je ein echtes Programm, eine Datei oder Webseite
+    setattr(win_api, _name, _stub)
+# Registry, Aufgabenplanung und Fenster-Hooks des Nutzers bleiben unberührt; die echten Funktionen prüfen eigene Tests mit Attrappen.
+REAL_WIN_API = {name: getattr(win_api, name) for name in (
+    "suppress_secondary_taskbars", "restore_secondary_taskbars", "install_logon_task", "remove_logon_task",
+    "ensure_logon_task", "watch_window_changes", "_in_background", "fullscreen_present")}
+for _name, _stub in (("suppress_secondary_taskbars", lambda: False), ("restore_secondary_taskbars", lambda notify: False),
+                     ("install_logon_task", lambda *a: False), ("remove_logon_task", lambda: None),
+                     ("ensure_logon_task", lambda *a: None), ("watch_window_changes", lambda callback, known: 0),
+                     ("_in_background", lambda job, *a: None), ("_schtasks", lambda *a: False),
+                     ("fullscreen_present", lambda monitor: False)):
     setattr(win_api, _name, _stub)
 
 
@@ -1972,7 +1991,8 @@ class Languages(unittest.TestCase):
 
     def test_automatic_follows_windows(self):
         self.assertEqual(i18n.wanted_language("auto", "fr_FR"), "fr")
-        self.assertEqual(i18n.wanted_language("auto", "ja_JP"), "en")
+        self.assertEqual(i18n.wanted_language("auto", "ja_JP"), "ja")  # seit 4.5 gibt es Japanisch
+        self.assertEqual(i18n.wanted_language("auto", "xx_YY"), "en")
         self.assertEqual(i18n.wanted_language("es", "de_DE"), "es")
 
 
@@ -2495,6 +2515,12 @@ class TileThemes(unittest.TestCase):
 
     TILED = ("tiles_obsidian", "tiles_frost", "tiles_graphite", "glass_clear", "glass_smoke")
 
+    def setUp(self):
+        # Im Dev-Build hängt das private Dev-Stylesheet hinten an; die Kachel-Regeln gelten davor.
+        patcher = unittest.mock.patch("core.theme_manager.dev_qss", return_value="")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_all_eight_are_offered_and_saved(self):
         from config.config_manager import THEMES
         for name in self.TILED:
@@ -2978,7 +3004,7 @@ class AnimatorNoFlash(unittest.TestCase):
         self.animator.enter(1.0, length=90)
         self.assertEqual(self.animator.duration(), 90)
         self.animator.leave()
-        self.assertEqual(self.animator.duration(), 220)
+        self.assertEqual(self.animator.duration(), round(220 * self.animator.scale))  # danach wieder die normale Länge
 
     def test_leave_without_hiding_puts_away_first(self):
         self.ctx.config.data["animations"]["enabled"] = False
@@ -3160,6 +3186,346 @@ class AutostartAndSessionEnd(unittest.TestCase):
             store.update({"StartupDelayInMSec": 0, "WaitForIdleState": 0})  # vom Nutzer selbst gesetzt
             win_api.restore_startup_delay()
             self.assertEqual(store, {"StartupDelayInMSec": 0, "WaitForIdleState": 0})
+
+
+class FakeRegistry:
+    """Ein Wörterbuch statt der Registry: {Schlüssel: {Name: Wert}}."""
+    HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_SET_VALUE, REG_DWORD, REG_SZ = 1, 2, 3, 4, 1
+
+    def __init__(self, data=None):
+        self.data = data or {}
+
+    class _Key:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def CreateKey(self, _root, path):
+        self.data.setdefault(path, {})
+        return self._Key(path)
+
+    def OpenKey(self, _root, path, *_args):
+        if path not in self.data:
+            raise OSError(path)
+        return self._Key(path)
+
+    def QueryValueEx(self, key, name):
+        try:
+            return self.data[key.path][name], 4
+        except KeyError:
+            raise OSError(name) from None
+
+    def SetValueEx(self, key, name, _reserved, _kind, value):
+        self.data[key.path][name] = value
+
+    def DeleteValue(self, key, name):
+        try:
+            del self.data[key.path][name]
+        except KeyError:
+            raise OSError(name) from None
+
+
+class PublishIgnoresPrivateFiles(unittest.TestCase):
+    """Das Dev-Menü bricht ab, wenn GEMINI.md oder die Start-Skripte mit hochgingen: .gitignore muss sie ausschließen."""
+
+    def test_public_language_files_have_no_dev_texts(self):
+        import build
+        if not build.PRIVATE_LANG_LIST.is_file():
+            self.skipTest("nur auf dem Entwickler-PC")
+        build.check_no_dev_keys(ROOT_PATH / "assets")  # sonst bricht „Bauen“ im Dev-Menü ab
+
+    def test_gitignore_keeps_dev_files_out(self):
+        lines = (ROOT_PATH / ".gitignore").read_text(encoding="utf-8").splitlines()
+        for entry in ("GEMINI.md", "/*.bat", "_private/", "nova/", "config/*", "**/pin.json", "*.log"):
+            self.assertIn(entry, lines)
+
+
+class FastAutostart(unittest.TestCase):
+    """Der Start direkt nach dem Anmelden: Aufgabe statt nur Run-Eintrag, keine aufblitzenden Zweitleisten."""
+    ADV = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+
+    def _registry(self, data=None):
+        fake = FakeRegistry(data)
+        patcher = unittest.mock.patch.object(win_api, "winreg", fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return fake
+
+    def test_secondary_taskbars_go_off_at_logoff_and_come_back(self):
+        fake = self._registry({self.ADV: {"MMTaskbarEnabled": 1}})
+        broadcasts = []
+        with unittest.mock.patch.object(win_api, "broadcast_setting_change", broadcasts.append):
+            self.assertTrue(REAL_WIN_API["suppress_secondary_taskbars"]())
+            self.assertEqual(fake.data[self.ADV]["MMTaskbarEnabled"], 0)
+            self.assertTrue(REAL_WIN_API["suppress_secondary_taskbars"]())  # zweimal: der echte Wert bleibt gemerkt
+            self.assertEqual(fake.data[win_api.POPWIN_KEY][win_api.SAVED_MM_VALUE], 1)
+            self.assertTrue(REAL_WIN_API["restore_secondary_taskbars"](notify=False))
+            self.assertEqual(fake.data[self.ADV]["MMTaskbarEnabled"], 1)
+            self.assertNotIn(win_api.SAVED_MM_VALUE, fake.data[win_api.POPWIN_KEY])
+            self.assertEqual(broadcasts, [])  # still: Der Explorer baut sie erst beim Einblenden
+            self.assertFalse(REAL_WIN_API["restore_secondary_taskbars"](notify=True))  # nichts gemerkt, nichts zu tun
+            self.assertEqual(broadcasts, [])
+
+    def test_users_own_choice_stays(self):
+        fake = self._registry({self.ADV: {"MMTaskbarEnabled": 0}})
+        self.assertFalse(REAL_WIN_API["suppress_secondary_taskbars"]())
+        self.assertEqual(fake.data[self.ADV]["MMTaskbarEnabled"], 0)
+        self.assertNotIn(win_api.SAVED_MM_VALUE, fake.data.get(win_api.POPWIN_KEY, {}))
+
+    def test_missing_value_is_removed_again(self):
+        fake = self._registry({self.ADV: {}})
+        with unittest.mock.patch.object(win_api, "broadcast_setting_change") as broadcast:
+            REAL_WIN_API["suppress_secondary_taskbars"]()
+            self.assertEqual(fake.data[self.ADV]["MMTaskbarEnabled"], 0)
+            REAL_WIN_API["restore_secondary_taskbars"](notify=True)
+        self.assertNotIn("MMTaskbarEnabled", fake.data[self.ADV])
+        broadcast.assert_called_once_with("TraySettings")
+
+    def test_session_end_suppresses_only_with_autostart(self):
+        for autostart in (True, False):
+            ctx = ResetContext()
+            ctx._taskbar_hidden = True
+            with unittest.mock.patch.object(win_api, "show_native_taskbar"), unittest.mock.patch("main.QTimer.singleShot"), \
+                    unittest.mock.patch.object(win_api, "autostart_enabled", return_value=autostart), \
+                    unittest.mock.patch.object(win_api, "suppress_secondary_taskbars") as suppress:
+                ctx.session_ending()
+            self.assertEqual(suppress.called, autostart)
+
+    def test_hiding_puts_the_real_value_back_quietly(self):
+        ctx = ResetContext()
+        ctx._started = True
+        screen = QGuiApplication.primaryScreen()
+        with unittest.mock.patch.object(ctx, "_wanted_bars", return_value={("m", Dock, "bottom"): (screen, Dock, "")}), \
+                unittest.mock.patch.object(ctx, "_start_watchdog"), unittest.mock.patch.object(win_api, "hide_native_taskbar"), \
+                unittest.mock.patch.object(win_api, "taskbar_state", return_value=1), \
+                unittest.mock.patch.object(win_api, "restore_secondary_taskbars") as restore:
+            ctx._apply_native_taskbar()
+        ctx._taskbar_guard.stop()
+        restore.assert_called_once_with(notify=False)
+
+    def test_task_xml_starts_fast_for_this_user_only(self):
+        import xml.dom.minidom
+        text = win_api.logon_task_xml(r"C:\P & F\pythonw.exe", r'"C:\P & F\main.py"', r"PC\michi")
+        self.assertIn(r"<UserId>PC\michi</UserId>", text)
+        self.assertEqual(text.count("<UserId>"), 2)  # Auslöser und Konto: sonst verlangt Windows Adminrechte
+        self.assertIn(f"<Priority>{win_api.TASK_PRIORITY}</Priority>", text)
+        self.assertIn("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", text)  # sonst beendet Windows PopWin nach 3 Tagen
+        self.assertIn("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>", text)
+        self.assertIn(r"<Command>C:\P &amp; F\pythonw.exe</Command>", text)
+        self.assertIn(r'<Arguments>"C:\P &amp; F\main.py" --autostart</Arguments>', text)
+        self.assertIn(r"<WorkingDirectory>C:\P &amp; F</WorkingDirectory>", text)
+        parsed = xml.dom.minidom.parseString(text.replace('encoding="UTF-16"', 'encoding="UTF-8"').encode("utf-8"))
+        self.assertEqual(parsed.documentElement.tagName, "Task")
+
+    def test_frozen_exe_task_has_only_the_flag(self):
+        text = win_api.logon_task_xml(r"C:\PopWin\PopWin.exe", "", "michi")
+        self.assertIn("<Arguments>--autostart</Arguments>", text)
+        self.assertIn(r"<WorkingDirectory>C:\PopWin</WorkingDirectory>", text)
+
+    def test_install_writes_utf16_and_cleans_up(self):
+        seen = {}
+
+        def schtasks(*arguments):
+            path = Path(arguments[arguments.index("/XML") + 1])
+            seen["text"] = path.read_text(encoding="utf-16")
+            seen["path"] = path
+            return True
+
+        with unittest.mock.patch.object(win_api, "_schtasks", schtasks), \
+                unittest.mock.patch.object(win_api, "_set_task_mark") as mark:
+            self.assertTrue(REAL_WIN_API["install_logon_task"]("C:/p/pythonw.exe", '"C:/p/main.py"'))
+        self.assertIn("<LogonTrigger>", seen["text"])
+        self.assertFalse(seen["path"].exists())
+        mark.assert_called_once_with(win_api.autostart_command("C:/p/pythonw.exe", '"C:/p/main.py"'))
+
+    def test_failed_install_keeps_no_mark(self):
+        with unittest.mock.patch.object(win_api, "_schtasks", return_value=False), \
+                unittest.mock.patch.object(win_api, "_set_task_mark") as mark:
+            self.assertFalse(REAL_WIN_API["install_logon_task"]("a.exe", ""))
+        mark.assert_called_once_with("")
+
+    def test_ensure_only_acts_when_needed(self):
+        command = win_api.autostart_command("a.exe", "b")
+        cases = (("", command, True, False),  # Autostart aus: nie eine Aufgabe
+                 (command, command, True, False),  # steht schon richtig
+                 (command, command, False, True),  # gelöscht, etwa in der Aufgabenplanung
+                 (command, "alt", True, True))  # zeigt auf ein anderes PopWin
+        for run_value, mark, exists, expected in cases:
+            with unittest.mock.patch.object(win_api, "_run_value", return_value=run_value), \
+                    unittest.mock.patch.object(win_api, "_task_mark", return_value=mark), \
+                    unittest.mock.patch.object(win_api, "logon_task_exists", return_value=exists), \
+                    unittest.mock.patch.object(win_api, "install_logon_task") as install:
+                REAL_WIN_API["ensure_logon_task"]("a.exe", "b")
+            self.assertEqual(install.called, expected, (run_value, mark, exists))
+
+    def test_switching_autostart_also_handles_the_task(self):
+        self._registry()
+        jobs = []
+        with unittest.mock.patch.object(win_api, "_in_background", lambda job, *a: jobs.append(job)), \
+                unittest.mock.patch.object(win_api, "_autostart_link", return_value=Path(tempfile.mkdtemp()) / "x.lnk"), \
+                unittest.mock.patch.object(win_api, "clear_startup_delay"), unittest.mock.patch.object(win_api, "restore_startup_delay"):
+            win_api.set_autostart(True, "a.exe", "b")
+            win_api.set_autostart(False, "a.exe", "b")
+        self.assertEqual(jobs, [win_api.install_logon_task, win_api.remove_logon_task])
+
+    def test_manual_fast_start_button_is_gone(self):
+        source = (ROOT_PATH / "ui" / "settings_window.py").read_text(encoding="utf-8")
+        self.assertNotIn('run_elevated("schtasks"', source)
+
+    def test_uninstaller_gives_the_setting_back(self):
+        source = (ROOT_PATH / "installer" / "setup.py").read_text(encoding="utf-8")
+        self.assertIn("_restore_secondary_taskbars()", source)
+        self.assertIn(win_api.SAVED_MM_VALUE, source)
+
+
+class TopbarKeepsFullscreenUp(unittest.TestCase):
+    """PopWin starten, neu starten oder die Topbar wieder einschalten, während schon ein Vollbild läuft:
+    Die Leiste darf sich keinen Platz nehmen, sonst schiebt Windows das Spiel nach unten."""
+
+    def _bar(self):
+        ctx = ResetContext()
+        bar = TopBar(ctx, QGuiApplication.primaryScreen(), "top")
+        bar.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        bar._registered = True
+        bar._fullscreen = False  # das Spiel liegt verdeckt, oben ist ein anderes Fenster
+        self.addCleanup(bar.hide)
+        patcher = unittest.mock.patch.object(bar, "reserves_space", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return bar
+
+    def test_hidden_game_holds_the_space_until_it_closes(self):
+        bar = self._bar()
+        with unittest.mock.patch.object(win_api, "appbar_set_pos", return_value=(0, 40, 1920, 1080)) as place, \
+                unittest.mock.patch.object(win_api, "fullscreen_present", return_value=True):
+            bar.reposition()
+            place.assert_not_called()
+            self.assertTrue(bar._reposition_later)
+            self.assertIsNotNone(bar._area)  # steht trotzdem schon am Rand
+            bar.apply_fullscreen_state(False)  # nächster Blick: Spiel noch da
+            place.assert_not_called()
+        with unittest.mock.patch.object(win_api, "appbar_set_pos", return_value=(0, 40, 1920, 1080)) as place, \
+                unittest.mock.patch.object(win_api, "fullscreen_present", return_value=False):
+            bar.apply_fullscreen_state(False)  # Spiel zu: jetzt erst Platz nehmen
+            place.assert_called_once()
+            self.assertFalse(bar._reposition_later)
+
+    def test_without_a_game_the_bar_takes_its_space_right_away(self):
+        bar = self._bar()
+        with unittest.mock.patch.object(win_api, "appbar_set_pos", return_value=(0, 40, 1920, 1080)) as place, \
+                unittest.mock.patch.object(win_api, "fullscreen_present", return_value=False):
+            bar.reposition()
+        place.assert_called_once()
+        self.assertFalse(bar._reposition_later)
+
+    def test_a_bar_that_already_has_its_space_does_not_look_again(self):
+        bar = self._bar()
+        bar._rect = (0, 40, 1920, 1080)
+        with unittest.mock.patch.object(win_api, "appbar_set_pos", return_value=(0, 40, 1920, 1080)), \
+                unittest.mock.patch.object(win_api, "fullscreen_present") as present:
+            bar.reposition()
+        present.assert_not_called()  # nur vor dem ersten Platznehmen, nicht bei jedem Stilwechsel
+
+    def test_present_sees_a_covered_game(self):
+        monitor = (0, 0, 1920, 1080)
+        rects = {1: (100, 100, 900, 700), 2: monitor}  # 1: kleines Fenster davor, 2: das Spiel dahinter
+        fake_user32 = unittest.mock.Mock()
+        fake_user32.IsWindowVisible.return_value = True
+        fake_user32.IsIconic.return_value = False
+        fake_user32.EnumWindows.side_effect = lambda proc, _l: [proc(hwnd, 0) for hwnd in rects]
+        with unittest.mock.patch.object(win_api, "user32", fake_user32), \
+                unittest.mock.patch.object(win_api, "_is_cloaked", return_value=False), \
+                unittest.mock.patch.object(win_api, "_counts_for_fullscreen", return_value=True), \
+                unittest.mock.patch.object(win_api, "_is_task_window", return_value=True), \
+                unittest.mock.patch.object(win_api, "is_overlay", return_value=False), \
+                unittest.mock.patch.object(win_api, "window_rect", side_effect=lambda hwnd: rects[hwnd]), \
+                unittest.mock.patch.object(win_api, "_fills", side_effect=lambda hwnd, mon: rects[hwnd] == mon), \
+                unittest.mock.patch.object(win_api, "game_waits", return_value=False):
+            self.assertTrue(REAL_WIN_API["fullscreen_present"](monitor))
+            rects.pop(2)
+            self.assertFalse(REAL_WIN_API["fullscreen_present"](monitor))
+
+
+class LiveTaskbar(unittest.TestCase):
+    """Geht ein Programm zu, verschwindet es sofort aus der Taskbar, nicht erst beim nächsten Nachsehen."""
+
+    def test_only_known_main_windows_count_when_closing(self):
+        known = lambda: {100}
+        relevant = win_api.window_change_relevant
+        self.assertTrue(relevant(win_api.EVENT_OBJECT_DESTROY, 100, win_api.OBJID_WINDOW, 0, known))
+        self.assertTrue(relevant(win_api.EVENT_OBJECT_HIDE, 100, win_api.OBJID_WINDOW, 0, known))
+        self.assertFalse(relevant(win_api.EVENT_OBJECT_DESTROY, 200, win_api.OBJID_WINDOW, 0, known))  # nicht in der Taskbar
+        self.assertFalse(relevant(win_api.EVENT_OBJECT_DESTROY, 100, -9, 0, known))  # Mauszeiger, kein Fenster
+        self.assertFalse(relevant(win_api.EVENT_OBJECT_DESTROY, 100, win_api.OBJID_WINDOW, 3, known))  # Teil eines Fensters
+        self.assertFalse(relevant(win_api.EVENT_OBJECT_DESTROY, 0, win_api.OBJID_WINDOW, 0, known))
+
+    def test_new_windows_count_only_when_they_belong_on_a_taskbar(self):
+        fake_user32 = unittest.mock.Mock()
+        fake_user32.GetAncestor.side_effect = lambda hwnd, _flag: hwnd
+        with unittest.mock.patch.object(win_api, "user32", fake_user32):
+            for is_task, expected in ((True, True), (False, False)):
+                with unittest.mock.patch.object(win_api, "_is_task_window", return_value=is_task):
+                    self.assertEqual(win_api.window_change_relevant(win_api.EVENT_OBJECT_SHOW, 5, 0, 0, lambda: set()), expected)
+            fake_user32.GetAncestor.side_effect = lambda hwnd, _flag: 1  # ein Kindfenster
+            with unittest.mock.patch.object(win_api, "_is_task_window", return_value=True):
+                self.assertFalse(win_api.window_change_relevant(win_api.EVENT_OBJECT_SHOW, 5, 0, 0, lambda: set()))
+
+    def test_a_closed_window_refreshes_the_bars_right_away(self):
+        ctx = ResetContext()
+        ctx._windows_time = time.monotonic()  # frischer Zwischenspeicher, der das Fenster noch enthält
+        with unittest.mock.patch.object(ctx, "_sync_bars") as sync:
+            ctx._on_window_change()
+            ctx._on_window_change()  # mehrere Fenster auf einmal: ein Durchlauf
+            self.assertTrue(ctx._window_change_timer.isActive())
+            ctx._window_change_timer.stop()
+            ctx._windows_changed()
+        sync.assert_called_once()
+        self.assertEqual(ctx._windows_time, 0.0)
+
+    def test_closed_popwin_ignores_late_events(self):
+        ctx = ResetContext()
+        ctx._closed = True
+        ctx._on_window_change()
+        self.assertFalse(ctx._window_change_timer.isActive())
+
+
+class DevMenuVersion(unittest.TestCase):
+    """Steht 4.5.0 noch nicht auf GitHub, schlägt das Dev-Menü genau 4.5.0 vor, nicht 4.5.1."""
+
+    def setUp(self):
+        from _private.devmenu import release
+        self.release = release
+
+    def test_tests_get_more_time_than_the_other_steps(self):
+        from _private.devmenu import menu, workers
+        self.assertEqual(menu.tests_step()[0], menu.TESTS_TITLE)
+        self.assertEqual(menu.step_timeout(menu.TESTS_TITLE), workers.TIMEOUT_TESTS)
+        self.assertGreaterEqual(workers.TIMEOUT_TESTS, 2 * 900)  # die ganze Suite dauert schon gut 11 Minuten
+        self.assertEqual(menu.step_timeout("Bauen"), workers.TIMEOUT_PUBLISH)
+
+    def test_unreleased_version_is_proposed_as_is(self):
+        self.assertEqual(self.release.proposed_version("4.5.0", False), "4.5.0")
+        self.assertEqual(self.release.proposed_version("4.5.0", True), "4.5.1")
+        self.assertEqual(self.release.proposed_version("4.5.0", None), "4.5.1")  # GitHub stumm: lieber nicht doppelt
+        self.assertEqual(self.release.proposed_version("", False), "")
+
+    def test_release_lookup(self):
+        answer = lambda code, err="": subprocess.CompletedProcess([], code, "", err)
+        with unittest.mock.patch.object(self.release, "gh_path", return_value="gh"):
+            with unittest.mock.patch.object(self.release, "run", return_value=answer(0)) as run:
+                self.assertTrue(self.release.release_exists("me/popwin", "4.5.0"))
+            self.assertIn("repos/me/popwin/releases/tags/v4.5.0", run.call_args.args)
+            with unittest.mock.patch.object(self.release, "run", return_value=answer(1, "gh: Not Found (HTTP 404)")):
+                self.assertFalse(self.release.release_exists("me/popwin", "4.5.0"))
+            with unittest.mock.patch.object(self.release, "run", return_value=answer(-1, "timeout")):
+                self.assertIsNone(self.release.release_exists("me/popwin", "4.5.0"))
+        with unittest.mock.patch.object(self.release, "gh_path", return_value=""):
+            self.assertIsNone(self.release.release_exists("me/popwin", "4.5.0"))
 
 
 class WallpaperRecovery(unittest.TestCase):
@@ -5340,8 +5706,11 @@ class TaskbarOptions(unittest.TestCase):
         self.set("media_style", "full")
         self.set("media_width", 300)
         self.assertEqual(media.maximumWidth(), 300)
-        self.assertFalse(media.artist.isHidden())
+        self.assertTrue(media.card)  # Karte: Cover als Hintergrund, kein eigenes Vorschaubild, in der Leiste ohne Künstler
+        self.assertTrue(media.thumb.isHidden())
+        self.assertTrue(media.artist.isHidden())
         self.set("media_style", "compact")
+        self.assertFalse(media.card)
         self.assertTrue(media.artist.isHidden())
         self.assertFalse(media.title.isHidden())
 
@@ -5372,8 +5741,6 @@ class TaskbarOptions(unittest.TestCase):
         host = self.ctx.settings.taskbar_monitors
         titles = [box.title() for box in host.findChildren(QGroupBox)]
         self.assertTrue(all(any(name in title for title in titles) for name in ("Elemente", "Apps", "Größe")))
-        topbar_titles = [box.text() for box in self.ctx.settings.topbar_page.findChildren(QCheckBox)]
-        self.assertNotIn("Papierkorb anzeigen", topbar_titles)
         texts = [box.text() for box in host.findChildren(QCheckBox)]
         for label in ("Papierkorb anzeigen", "Player anzeigen", "Suche anzeigen", "Home-Knopf anzeigen"):
             self.assertIn(label, texts)
@@ -5481,10 +5848,15 @@ class Files(unittest.TestCase):
             self.assertEqual(unique_path(root, "Neue Textdatei", ".txt").name, "Neue Textdatei (2).txt")
 
 
+# Dev-Tests brauchen den privaten Ordner _private/devmenu (nie eingecheckt). Ohne ihn werden sie übersprungen (F-6).
+DEV_PRIVATE_PRESENT = (Path(__file__).resolve().parent.parent / "_private" / "devmenu" / "__init__.py").is_file()
+DEV_SKIP = unittest.skipUnless(DEV_PRIVATE_PRESENT, "privater Dev-Ordner _private/devmenu fehlt")
+
+
 def ovh_module():
-    """Die OVH-Anbindung liegt in devtools und kommt nur über importlib, wie in PopWin selbst."""
+    """Die OVH-Anbindung liegt in _private/devmenu und kommt nur über importlib, wie in PopWin selbst."""
     import importlib
-    return importlib.import_module("devtools.ovh_domains")
+    return importlib.import_module("_private.devmenu.ovh_domains")
 
 
 class FakeOvh:
@@ -5543,8 +5915,7 @@ class NovaArtifacts(unittest.TestCase):
     def test_store_lives_in_the_data_folder_and_survives_a_restart(self):
         from core.paths import DATA_DIR
         self.assertEqual(nova_artifacts.ARTIFACT_DIR, DATA_DIR / "nova_artifacts")
-        release = importlib.import_module("devtools.release")
-        self.assertIn("config/*", release.GITIGNORE)  # im Quellordner liegt DATA_DIR in config/, das nie eingecheckt wird
+        self.assertIn("config/*", (ROOT_PATH / ".gitignore").read_text(encoding="utf-8").splitlines())  # im Quellordner liegt DATA_DIR in config/, das nie eingecheckt wird
         self.run_tool("artifact_create", title="Umzug planen", kind="aufgabe", steps="Kisten\nWagen\nSchlüssel")
         again = ArtifactStore(self.nova.artifacts.folder)
         self.assertEqual([item["title"] for item in again.all()], ["Umzug planen"])
@@ -5793,7 +6164,7 @@ class NovaWatch(unittest.TestCase):
         monitor = nova_artifacts.new_artifact("OVH", "ueberwachung")
         monitor["check"] = "ovh_domains"
         with unittest.mock.patch("core.nova_tools.is_dev", return_value=False):
-            self.assertIn("Entwickler-Build", nova_watch.run_check(self.nova, monitor)["failed"])
+            self.assertIn("nicht verfügbar", nova_watch.run_check(self.nova, monitor)["failed"])
 
 
 class OvhDomains(unittest.TestCase):
@@ -5911,7 +6282,7 @@ class OvhDomains(unittest.TestCase):
 
     def test_dev_build_brings_the_example_once(self):
         import importlib
-        seed = importlib.import_module("devtools.nova_seed")
+        seed = importlib.import_module("_private.devmenu.nova_seed")
         made = seed.seed(self.ctx.nova)
         titles = sorted(item["title"] for item in self.ctx.nova.artifacts.all())
         self.assertEqual(titles, ["OVH einrichten", "OVH-Domains überwachen"])
@@ -6109,9 +6480,9 @@ class DevSearch(unittest.TestCase):
 
     def test_menu_is_loaded_by_name_only(self):
         source = (ROOT_PATH / "core" / "dev.py").read_text(encoding="utf-8")
-        self.assertIn('importlib.import_module("devtools.menu")', source)
+        self.assertIn('PRIVATE_PACKAGE = "_private.devmenu"', source)
         for path in (ROOT_PATH / "ui").glob("*.py"):
-            self.assertNotIn("import devtools", path.read_text(encoding="utf-8"), path.name)
+            self.assertNotIn("import _private", path.read_text(encoding="utf-8"), path.name)
 
 
 class NotesResize(unittest.TestCase):
@@ -6186,7 +6557,7 @@ class ClaudeKnopf(unittest.TestCase):
 
     def test_never_for_others(self):
         ctx = ResetContext()
-        with unittest.mock.patch("ui.taskbar.is_dev", return_value=False):
+        with unittest.mock.patch("ui.taskbar.is_dev", return_value=False), unittest.mock.patch("core.dev.is_dev", return_value=False):
             dock = Dock(ctx, QGuiApplication.primaryScreen(), "bottom")
         self.assertIsNone(dock.claude)
         dock.hide()
@@ -6754,9 +7125,33 @@ class PowerAndBeta(unittest.TestCase):
         self.assertFalse(dock._magnify_timer.isActive())
         dock.close()
 
+    def test_tray_worker_tries_win_b_first(self):
+        """Wie in 3.8.5 zuerst Win+B und Enter; UI Automation nur, wenn danach kein Überlauf-Fenster da ist."""
+        windows = iter([0, 4711])
+        with unittest.mock.patch.object(win_api, "send_keys") as keys, \
+                unittest.mock.patch.object(win_api, "time") as clock, \
+                unittest.mock.patch.object(win_api, "tray_overflow_window", side_effect=lambda: next(windows, 4711)), \
+                unittest.mock.patch.object(win_api, "_invoke_win11_tray_chevron") as uia, \
+                unittest.mock.patch.object(win_api, "_click_classic_tray_chevron") as classic:
+            clock.sleep = lambda *_: None
+            clock.monotonic = time.monotonic
+            self.assertTrue(win_api._open_tray_overflow_worker())
+        self.assertEqual(keys.call_args_list[0].args, (win_api.VK_LWIN, win_api.VK_B))
+        self.assertEqual(keys.call_args_list[1].args, (win_api.VK_RETURN,))
+        uia.assert_not_called()
+        classic.assert_not_called()
+
+    def test_stuck_tray_attempt_does_not_block_the_arrow_forever(self):
+        started = []
+        with unittest.mock.patch.object(win_api, "_tray_uia_lock") as lock, \
+                unittest.mock.patch.object(win_api, "_tray_busy_since", [time.monotonic() - 60]):
+            lock.acquire.return_value = False  # ein alter Versuch hängt noch
+            win_api._run_win11_tray_chevron(0.5, lambda: started.append(1) or True)
+        self.assertEqual(started, [1])
+
     def test_tray_arrow_opens_the_windows_menu_like_before(self):
         top = TopBar(self.ctx, QGuiApplication.primaryScreen(), "top")
-        with unittest.mock.patch.object(win_api, "open_tray_overflow") as keys, \
+        with unittest.mock.patch.object(win_api, "open_tray_overflow_async") as keys, \
                 unittest.mock.patch.object(win_api, "tray_overflow_window", return_value=0):
             top._tray_was_open = False
             top._toggle_tray()
@@ -6787,34 +7182,6 @@ class PowerAndBeta(unittest.TestCase):
         path = Path(tempfile.mkdtemp()) / "settings.json"
         path.write_text(json.dumps({"theme": "tiles_neon"}), encoding="utf-8")
         self.assertEqual(ConfigManager(path).data["theme"], "tiles_graphite")
-
-    def test_new_settings_menu_groups_the_pages(self):
-        from ui.settings_window import grouped_nav
-        rows = grouped_nav(["Themes", "Topbar", "Neu", "Beta"])
-        self.assertEqual(rows[0], ("Aussehen", True))
-        self.assertIn(("Neu", False), rows)  # Unbekanntes landet unter der letzten Gruppe
-        self.assertEqual(rows[-2:], [("Beta", False), ("Neu", False)])
-        window = self.ctx.settings
-        nav = window.tabs.nav
-        visible = lambda: [nav.item(r).text() for r in range(nav.count()) if not nav.item(r).isHidden()]
-        self.assertIn("AUSSEHEN", visible())  # ab 4.0 ist das neue Menü Standard
-        self.ctx.config.set("settings_v2", False)
-        self.assertNotIn("Übersicht", visible())  # klassisch: ohne Übersicht und ohne Überschriften
-        self.assertNotIn("AUSSEHEN", visible())
-        self.ctx.config.set("settings_v2", True)
-        self.assertIn("Übersicht", visible())
-        self.assertIn("AUSSEHEN", visible())
-        self.assertEqual(window.tabs.currentIndex(), window.overview_tab)
-        window.open_named("Taskbar")
-        self.assertIs(window.tabs.currentWidget(), window.taskbar_page)
-        self.assertEqual(window.tabs.tabText(window.overview_tab), "Übersicht")
-        self.ctx.config.set("settings_v2", False)
-        self.assertNotIn("Übersicht", visible())
-        window.hide()
-
-
-class ThemesAndPower(unittest.TestCase):
-    """Eigene Themes, Neon-Nacht, Nova abschalten, Leistungsstufe, Windows entlasten und das Aufploppen."""
 
     def setUp(self):
         self.ctx = ResetContext()
@@ -6896,8 +7263,8 @@ class ThemesAndPower(unittest.TestCase):
 
     def test_saver_level_turns_off_animations(self):
         from ui.animation import animation_duration, duration_of
-        self.assertEqual(animation_duration({"enabled": True, "duration": 200}, "saver"), 0)
-        self.assertEqual(animation_duration({"enabled": True, "duration": 200}, "balanced"), 200)
+        self.assertEqual(animation_duration({"enabled": True, "duration": 200}, level="saver"), 0)
+        self.assertEqual(animation_duration({"enabled": True, "duration": 200}, level="balanced"), 200)
         self.ctx.config.set("performance.level", "saver")
         self.assertEqual(duration_of(self.ctx.config), 0)
         self.ctx.config.set("taskbar.magnify", True)
@@ -7096,6 +7463,94 @@ class NoFlashingWindows(unittest.TestCase):
         dock.close()
 
 
+class MediaCard(unittest.TestCase):
+    """Player wie die Windows-Karte: Cover als Hintergrund, Titel, Fortschritt und Knöpfe mittig."""
+
+    def song(self, **extra):
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        image = QImage(64, 36, QImage.Format.Format_RGB32)
+        image.fill(QColor("#336699"))
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        media = {"title": "Washing Machine Heart", "artist": "Mitski", "app": "spotify", "playing": True,
+                 "thumbnail": bytes(data), "position": 30.0, "duration": 120.0}
+        media.update(extra)
+        return media
+
+    def test_progress_runs_on_between_reports(self):
+        from ui.taskbar import media_progress
+        self.assertAlmostEqual(media_progress(30, 120, True, 30), 0.5)
+        self.assertAlmostEqual(media_progress(30, 120, False, 30), 0.25)  # pausiert bleibt sie stehen
+        self.assertEqual(media_progress(500, 120, True, 0), 1.0)
+        self.assertEqual(media_progress(10, 0, True, 5), 0.0)  # Player ohne Zeitleiste
+
+    def test_cover_fills_the_card_without_stretching(self):
+        from ui.taskbar import cover_crop
+        self.assertEqual(cover_crop(300, 300, 250, 50), (0, 120, 300, 60))
+        self.assertEqual(cover_crop(1600, 900, 100, 100), (350, 0, 900, 900))
+
+    def test_only_seeking_counts_as_a_change(self):
+        from core.media_controller import media_changed
+        old = self.song()
+        self.assertFalse(media_changed(old, self.song(position=31.0), 1.0))  # läuft nur weiter
+        self.assertTrue(media_changed(old, self.song(position=90.0), 1.0))  # gespult
+        self.assertTrue(media_changed(old, self.song(playing=False), 1.0))
+        self.assertTrue(media_changed(old, None, 1.0))
+        self.assertFalse(media_changed(None, None, 1.0))
+
+    def test_song_position_counts_time_since_the_last_report(self):
+        from datetime import datetime, timedelta, timezone
+        from core.media_controller import song_position
+        now = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(song_position(10, 100, True, now - timedelta(seconds=5), now), 15)
+        self.assertEqual(song_position(10, 100, False, now - timedelta(seconds=5), now), 10)
+        self.assertEqual(song_position(99, 100, True, now - timedelta(seconds=50), now), 100)
+        self.assertEqual(song_position(10, 0, True, None, now), 0.0)
+
+    def test_full_style_is_a_card_with_centered_controls(self):
+        from ui.taskbar import MediaBox
+        ctx = ResetContext()
+        box = MediaBox(ctx, width=250, tall=True)
+        box.update_media(self.song())
+        self.assertTrue(box.card)
+        self.assertTrue(box.thumb.isVisibleTo(box))  # im Widget links das scharfe Cover
+        self.assertEqual(box.thumb.pixmap().width(), box.thumb.width())
+        self.assertTrue(box.artist.isVisibleTo(box))
+        self.assertTrue(box.progress.isVisibleTo(box))
+        self.assertAlmostEqual(box.progress.value, 0.25, places=1)
+        self.assertFalse(box._cover.isNull())
+        box.resize(250, 90)
+        self.assertEqual(box._card_background().size(), box.size())
+        box.grab()  # zeichnen darf nicht abstürzen
+        box.set_style("compact", 250)  # zurück zur alten Zeile
+        self.assertFalse(box.card)
+        self.assertFalse(box.progress.isVisibleTo(box))
+        box.set_style("full", 250)
+        self.assertTrue(box.card)
+        self.assertIs(box.prev.parent(), box)
+
+    def test_taskbar_card_stays_low(self):
+        from ui.taskbar import MediaBox
+        ctx = ResetContext()
+        box = MediaBox(ctx, width=250)
+        box.update_media(self.song())
+        self.assertTrue(box.card)
+        self.assertFalse(box.artist.isVisibleTo(box))  # in der Leiste nur Titel, Fortschritt und Knöpfe
+        self.assertFalse(box.thumb.isVisibleTo(box))
+        self.assertLessEqual(box.sizeHint().height(), 46)
+        box.set_compact(True)  # kompakte Themes: keine Karte
+        self.assertFalse(box.card)
+
+    def test_player_without_timeline_hides_the_line(self):
+        from ui.taskbar import MediaBox
+        box = MediaBox(ResetContext(), width=250, tall=True)
+        box.update_media(self.song(position=0.0, duration=0.0))
+        self.assertFalse(box.progress.isVisibleTo(box))
+        self.assertFalse(box._ticker.isActive())
+
+
 class StartVariants(unittest.TestCase):
     """Verschiedene Aussehen des Home-Menüs, mit Vorschau in den Einstellungen."""
 
@@ -7186,18 +7641,29 @@ class BarDesignerTests(unittest.TestCase):
         self.assertEqual(sorted(order), sorted(set(order)))  # nichts doppelt
 
 
+@DEV_SKIP
 class DevMenuHelpers(unittest.TestCase):
     """Dev-Menü: Fehler klar benennen und Changelogs mit PopWin KI umschreiben (ohne echte KI-Anfrage)."""
 
+    def test_tools_page_builds_without_crashing(self):
+        """Die Werkzeug-Kacheln überschrieben sizeHint über ihr Layout; unter PySide6 6.12 riss das PopWin beim Öffnen hart ab."""
+        from _private.devmenu import view
+        page = view.ToolsPage()
+        scroll = view._wrap_scroll(page)
+        self.assertGreater(scroll.sizeHint().height(), 0)
+        for tile in page.tiles.values():
+            self.assertGreaterEqual(tile.minimumHeight(), tile.title_label.sizeHint().height())
+        scroll.deleteLater()
+
     def test_error_lines_find_the_reason(self):
-        from devtools.menu import error_lines
+        from _private.devmenu.menu import error_lines
         lines = ["Baue …", "ok", "Traceback (most recent call last):", '  File "build.py"', "ValueError: kaputt"]
         self.assertEqual(error_lines(lines), ["Traceback (most recent call last):", "ValueError: kaputt"])
         self.assertEqual(error_lines(["eins", "zwei", ""]), ["eins", "zwei"])  # ohne Fehlerwort: das Ende der Ausgabe
         self.assertEqual(len(error_lines([f"error {n}" for n in range(30)])), 8)
 
     def test_rewrite_prompt_and_cleanup(self):
-        from devtools.menu import REWRITE_PRESETS, clean_list, rewrite_prompt
+        from _private.devmenu.menu import REWRITE_PRESETS, clean_list, rewrite_prompt
         system, content = rewrite_prompt("- Neu: Themes", "Mit Emojis", "lustig")
         self.assertIn("Markdown-Liste", system)
         self.assertIn(REWRITE_PRESETS["Mit Emojis"], content)
@@ -7206,7 +7672,7 @@ class DevMenuHelpers(unittest.TestCase):
         self.assertEqual(clean_list("Klar:\n```markdown\n* Eins\n- Zwei\n```"), "- Eins\n- Zwei")
 
     def test_worker_reports_failures_kindly(self):
-        from devtools.menu import RewriteWorker
+        from _private.devmenu.menu import RewriteWorker
         from core import gemini_client
         worker = RewriteWorker("schluessel", ["m"], "s", "c")
         got = []
@@ -7220,9 +7686,10 @@ class DevMenuHelpers(unittest.TestCase):
         self.assertEqual(got[-1], "- a\n- b")
 
 
+@DEV_SKIP
 class ClaudeButtonSize(unittest.TestCase):
     def test_claude_button_is_as_big_as_home(self):
-        from ui.claude_button import ClaudeButton
+        from _private.devmenu.claude_button import ClaudeButton
         ctx = ResetContext()
         ctx.windows = lambda: []
         dock = Dock(ctx, QGuiApplication.primaryScreen(), "bottom")
@@ -7237,16 +7704,6 @@ class ClaudeButtonSize(unittest.TestCase):
         self.assertEqual(claude.objectName(), dock.start.objectName())
         dock.close()
 
-
-class SettingsMenuDefault(unittest.TestCase):
-    def test_new_menu_is_switched_on_once_for_old_settings(self):
-        path = Path(tempfile.mkdtemp()) / "settings.json"
-        path.write_text(json.dumps({"settings_v2": False}), encoding="utf-8")
-        config = ConfigManager(path)
-        self.assertTrue(config.get("settings_v2"))  # 3.x hatte „aus“ gespeichert, ab 4.0 ist es an
-        config.set("settings_v2", False)
-        config.save()
-        self.assertFalse(ConfigManager(path).get("settings_v2"))  # wer es danach selbst ausschaltet, behält das
 
 class TopbarAndAudioExtras(unittest.TestCase):
     """Eingabegeräte, Mikrofon-Fenster, Topbar-Symbole verschieben, Rechtsklick, Nicht stören, Theme in der Übersicht."""
@@ -7478,6 +7935,531 @@ class GameMinimizesBehindNova(unittest.TestCase):
     def test_closed_or_restored_game_is_forgotten(self):
         self.assertTrue(self._fullscreen(self.GAME, False, self.GAME))
         self.assertFalse(self._fullscreen(0, False, self.NOVA))  # Spiel ist nicht abgelegt, nur nicht mehr Vollbild
+
+
+# --- [Antigravity Start] Unit-Tests für TexttoSpeech for Windows ---
+class TextToSpeechTests(unittest.TestCase):
+    """Config-, Build-, DSP-, Lazy-Import-, Lifecycle- und UI-Tests für TexttoSpeech for Windows."""
+
+    def test_config_and_build_integration(self):
+        import importlib
+        import runpy
+        from core import paths
+        from extensions.tts_for_windows import TTS_DEFAULTS
+
+        self.assertEqual(DEFAULTS["extensions"]["tts_for_windows"], TTS_DEFAULTS)
+        self.assertEqual(set(DEFAULTS["extensions"]["tts_for_windows"]), set(TTS_DEFAULTS))
+
+        import build  # legt beim Import seit 4.5 keine Ordner mehr an
+        for mod in ("extensions.tts_for_windows", "extensions.discord", "tts.app", "tts.audio"):
+            self.assertIn(mod, build.APP_MODULES)
+
+        self.assertEqual(paths.SCRIPTS["tts_for_windows"], "tts/app.py")
+
+        self.assertEqual(win_api.popwin_app_of(["--app", "tts_for_windows"]), "tts_for_windows")
+        self.assertEqual(win_api.popwin_app_of([str(ROOT_PATH / "tts" / "app.py")]), "tts_for_windows")
+        self.assertEqual(win_api.popwin_app_of([f"{ROOT_PATH}/tts/app.py"]), "tts_for_windows")
+        self.assertEqual(
+            win_api.popwin_app_of([str(ROOT_PATH / "extensions" / "tts_for_windows.py")]),
+            "tts_for_windows",
+        )
+        self.assertNotIn("tts_for_windows", win_api.INTERNAL_APPS)
+
+        ctx = ResetContext()
+        slot_key, slot_data = taskbar_slot(ctx, "tts_for_windows")
+        self.assertEqual(slot_key, "popwin:tts_for_windows")
+        self.assertEqual(slot_data["name"], "TexttoSpeech for Windows")
+
+        if hasattr(popwin_main, "_module"):
+            self.assertEqual(popwin_main._module["tts_for_windows"], "tts.app")
+        else:
+            saved_path = list(sys.path)
+            self.addCleanup(setattr, sys, "path", saved_path)
+            fake_mod = unittest.mock.Mock()
+            fake_mod.main.return_value = 0
+            with unittest.mock.patch.object(sys, "argv", ["PopWin.exe", "--app", "tts_for_windows"]), \
+                    unittest.mock.patch.object(importlib, "import_module", return_value=fake_mod) as imp_mock:
+                with self.assertRaises(SystemExit) as cm:
+                    runpy.run_path(str(ROOT_PATH / "main.py"), run_name="__main__")
+            self.assertEqual(cm.exception.code, 0)
+            imp_mock.assert_called_once_with("tts.app")
+            fake_mod.main.assert_called_once_with()
+
+    def test_dsp_helpers_and_styles(self):
+        import numpy as np
+        from tts import audio as tts_audio
+
+        self.assertEqual(tts_audio.STYLES, ("cyber", "droid", "classic", "clean"))
+
+        self.assertTrue(tts_audio.is_scream_text("HALLO WELT"))
+        self.assertTrue(tts_audio.is_scream_text("Hallo!"))
+        self.assertFalse(tts_audio.is_scream_text("hallo welt"))
+        self.assertTrue(tts_audio.is_scream_text("hallo welt", force_scream=True))
+
+        src = np.sin(2.0 * np.pi * 220.0 * np.arange(2205, dtype=np.float32) / 22050.0).astype(np.float32)
+        up = tts_audio.resample_1d(src, 22050, 44100)
+        self.assertEqual(up.dtype, np.float32)
+        self.assertEqual(up.size, 4410)
+        self.assertTrue(np.all(np.isfinite(up)))
+
+        down = tts_audio.resample_1d(up, 44100, 16000)
+        self.assertEqual(down.dtype, np.float32)
+        self.assertEqual(down.size, 1600)
+        self.assertTrue(np.all(np.isfinite(down)))
+
+        empty = tts_audio.resample_1d(np.zeros(0, dtype=np.float32), 22050, 44100)
+        self.assertEqual(empty.dtype, np.float32)
+        self.assertEqual(empty.size, 0)
+
+        sr = 22050
+        t = np.arange(int(sr * 0.2), dtype=np.float32) / np.float32(sr)
+        tone = (0.5 * np.sin(2.0 * np.pi * 220.0 * t)).astype(np.float32)
+
+        for style in tts_audio.STYLES:
+            hp, vm = tts_audio.apply_robot_dsp(tone, sr, style=style, scream=False, boost_pct=280, normal_pct=100)
+            self.assertEqual(hp.dtype, np.float32)
+            self.assertEqual(vm.dtype, np.float32)
+            self.assertGreater(hp.size, 0)
+            self.assertEqual(hp.size, vm.size)
+            self.assertTrue(np.all(np.isfinite(hp)))
+            self.assertTrue(np.all(np.isfinite(vm)))
+            self.assertLessEqual(float(np.max(np.abs(hp))), 0.96 + 1e-6)
+            self.assertLessEqual(float(np.max(np.abs(vm))), 0.96 + 1e-6)
+            self.assertLess(abs(float(hp[0])), 1e-4)
+            self.assertLess(abs(float(hp[-1])), 1e-4)
+            self.assertLess(abs(float(vm[0])), 1e-4)
+            self.assertLess(abs(float(vm[-1])), 1e-4)
+
+        def rms(arr: np.ndarray) -> float:
+            return float(np.sqrt(np.mean(arr * arr)))
+
+        hp_norm, vm_norm = tts_audio.apply_robot_dsp(tone, sr, style="cyber", scream=False, boost_pct=280, normal_pct=100)
+        hp_scream, vm_scream = tts_audio.apply_robot_dsp(tone, sr, style="cyber", scream=True, boost_pct=280, normal_pct=100)
+        _, vm_low_norm = tts_audio.apply_robot_dsp(tone, sr, style="cyber", scream=False, boost_pct=280, normal_pct=60)
+        _, vm_high_norm = tts_audio.apply_robot_dsp(tone, sr, style="cyber", scream=False, boost_pct=280, normal_pct=140)
+        _, vm_low_boost = tts_audio.apply_robot_dsp(tone, sr, style="cyber", scream=True, boost_pct=120, normal_pct=100)
+        _, vm_high_boost = tts_audio.apply_robot_dsp(tone, sr, style="cyber", scream=True, boost_pct=380, normal_pct=100)
+
+        self.assertGreater(rms(vm_scream), rms(vm_norm))
+        self.assertGreater(rms(hp_scream), rms(hp_norm))
+        self.assertGreater(rms(vm_high_norm), rms(vm_low_norm))
+        self.assertGreater(rms(vm_high_boost), rms(vm_low_boost))
+
+        hp_empty, vm_empty = tts_audio.apply_robot_dsp(np.zeros(0, dtype=np.float32), sr)
+        self.assertEqual((hp_empty.size, vm_empty.size), (0, 0))
+        hp_sil, vm_sil = tts_audio.apply_robot_dsp(np.zeros(256, dtype=np.float32), sr)
+        self.assertEqual((hp_sil.size, vm_sil.size), (256, 256))
+        self.assertTrue(np.all(np.isfinite(hp_sil)) and np.all(np.isfinite(vm_sil)))
+
+    def test_extension_lazy_import(self):
+        probe = (
+            "import json, sys; "
+            "import extensions.tts_for_windows; "
+            "heavy = ('tts.audio', 'numpy', 'sounddevice', 'pycaw', 'winsdk'); "
+            "loaded = [m for m in heavy if m in sys.modules or any(k.startswith(m + '.') for k in sys.modules)]; "
+            "print(json.dumps(loaded))"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=str(ROOT_PATH),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(json.loads(proc.stdout.strip()), [])
+
+    def test_extension_settings_rows_and_voice_dedup(self):
+        from PySide6.QtWidgets import QFormLayout
+        import tts.audio  # noqa: F401 - stellt Patch-Ziel sicher
+
+        ctx = ResetContext()
+        ext = ctx.extensions.items["tts_for_windows"]
+
+        voices = [
+            ("auto", "Automatisch (Windows Standard)"),
+            ("winsdk:katja", "Microsoft Katja (de-DE)"),
+            ("sapi:hedda", "Microsoft Hedda [SAPI5]"),
+        ]
+        outs = [
+            system_status.AudioOutput("o1", "Lautsprecher (Razer Kraken V4 X)", True),
+            system_status.AudioOutput("o2", "Steam Streaming Microphone (Valve)", False),
+        ]
+        ins = [system_status.AudioOutput("i1", "Mikrofon (HyperX QuadCast S)", True)]
+
+        host1 = QWidget()
+        self.addCleanup(host1.deleteLater)
+        form1 = QFormLayout(host1)
+        with unittest.mock.patch.object(system_status, "audio_outputs", return_value=outs), \
+                unittest.mock.patch.object(system_status, "audio_inputs", return_value=ins), \
+                unittest.mock.patch("tts.audio.list_available_voices", return_value=voices), \
+                unittest.mock.patch("tts.audio.find_virtual_output_device", return_value=(3, "Steam Streaming Microphone")):
+            ext.settings(form1, None)
+
+        self.assertEqual(form1.rowCount(), 19)
+        combos1 = host1.findChildren(QComboBox)
+        voice_combo1 = combos1[0]
+        auto_ids = [i for i in range(voice_combo1.count()) if voice_combo1.itemData(i) == "auto"]
+        auto_labels = [i for i in range(voice_combo1.count()) if voice_combo1.itemText(i) == "Automatisch (Windows Standard)"]
+        self.assertEqual(len(auto_ids), 1)
+        self.assertEqual(len(auto_labels), 1)
+        voice_data1 = [voice_combo1.itemData(i) for i in range(voice_combo1.count())]
+        self.assertIn("winsdk:katja", voice_data1)
+        self.assertIn("sapi:hedda", voice_data1)
+        all_labels1 = " | ".join(lbl.text() for lbl in host1.findChildren(QLabel))
+        self.assertIn("Steam Streaming Microphone", all_labels1)
+
+        host2 = QWidget()
+        self.addCleanup(host2.deleteLater)
+        form2 = QFormLayout(host2)
+        with unittest.mock.patch.object(system_status, "audio_outputs", side_effect=RuntimeError("out fail")), \
+                unittest.mock.patch.object(system_status, "audio_inputs", side_effect=RuntimeError("in fail")), \
+                unittest.mock.patch("tts.audio.list_available_voices", side_effect=RuntimeError("voices fail")), \
+                unittest.mock.patch("tts.audio.find_virtual_output_device", side_effect=RuntimeError("vm fail")):
+            ext.settings(form2, None)
+
+        self.assertEqual(form2.rowCount(), 19)
+        voice_combo2 = host2.findChildren(QComboBox)[0]
+        self.assertEqual([voice_combo2.itemData(i) for i in range(voice_combo2.count())].count("auto"), 1)
+
+        host3 = QWidget()
+        self.addCleanup(host3.deleteLater)
+        form3 = QFormLayout(host3)
+        with unittest.mock.patch.object(system_status, "audio_outputs", return_value=[]), \
+                unittest.mock.patch.object(system_status, "audio_inputs", return_value=[]), \
+                unittest.mock.patch("tts.audio.list_available_voices", return_value=[]), \
+                unittest.mock.patch("tts.audio.find_virtual_output_device", return_value=(None, "Nicht gefunden")):
+            ext.settings(form3, None)
+
+        self.assertEqual(form3.rowCount(), 19)
+        voice_combo3 = host3.findChildren(QComboBox)[0]
+        self.assertEqual([voice_combo3.itemData(i) for i in range(voice_combo3.count())].count("auto"), 1)
+
+    def test_extension_ipc_config_and_stop(self):
+        import tts.audio  # noqa: F401 - stellt Patch-Ziel sicher
+
+        ctx = ResetContext()
+        ext = ctx.extensions.items["tts_for_windows"]
+
+        written: list[str] = []
+        pipe = unittest.mock.Mock()
+        pipe.closed = False
+        pipe.write.side_effect = written.append
+        pipe.close.side_effect = lambda: setattr(pipe, "closed", True)
+
+        proc = unittest.mock.Mock()
+        proc.poll.return_value = None
+        proc.stdin = pipe
+
+        ext.process = proc
+        ext._has_run = True
+
+        ctx.config.set("extensions.tts_for_windows.robot_style", "droid", notify=False)
+        ext._on_config_changed("extensions.tts_for_windows.robot_style")
+        self.assertEqual(len(written), 1)
+        msg = json.loads(written[0])
+        self.assertEqual(msg["cmd"], "config")
+        self.assertEqual(msg["data"]["robot_style"], "droid")
+
+        ext._on_config_changed("unrelated.setting")
+        self.assertEqual(len(written), 1)
+
+        env_no_smoke = {k: v for k, v in os.environ.items() if k != "POPWIN_SMOKE"}
+        with unittest.mock.patch.dict(os.environ, env_no_smoke, clear=True), \
+                unittest.mock.patch("tts.audio.restore_normal_audio", return_value=(True, "ok")) as restore_mock:
+            ext.stop()
+
+        self.assertEqual(json.loads(written[-1]), {"cmd": "quit"})
+        self.assertTrue(pipe.closed)
+        self.assertTrue(pipe.flush.called)
+        proc.wait.assert_called_once_with(timeout=1.5)
+        self.assertIsNone(ext.process)
+        self.assertFalse(ext.running)
+        self.assertFalse(ext._has_run)
+        restore_mock.assert_called_once_with(
+            mute_virtual_speaker=True,
+            preferred_input=ext._preferred_input,
+            preferred_output=ext._preferred_output,
+        )
+
+    def test_compact_window_smoke_and_send_text(self):
+        from PySide6.QtCore import QSize
+        from tts.app import APP_TITLE, CompactTTSWindow
+
+        win = CompactTTSWindow(smoke=True)
+        self.addCleanup(win.cleanup)
+
+        self.assertEqual(win.windowTitle(), APP_TITLE)
+        self.assertEqual(APP_TITLE, "TexttoSpeech for Windows")
+        self.assertEqual((win.width(), win.height()), (540, 74))
+        self.assertEqual(win.minimumSize(), QSize(540, 74))
+        self.assertEqual(win.maximumSize(), QSize(540, 74))
+        flags = win.windowFlags()
+        self.assertTrue(bool(flags & Qt.WindowType.FramelessWindowHint))
+        self.assertTrue(bool(flags & Qt.WindowType.WindowStaysOnTopHint))
+        self.assertFalse(win._anim_timer.isActive())
+
+        mock_engine = unittest.mock.Mock()
+        win._engine = mock_engine
+        win.input.setText("  Hallo Roboter  ")
+        win.send_text()
+        self.assertEqual(win.input.text(), "")
+        mock_engine.speak.assert_called_once_with("Hallo Roboter", force_scream=False)
+
+        mock_engine.reset_mock()
+        win.scream_btn.setChecked(True)
+        win.input.setText("SCHREI")
+        win.send_text()
+        self.assertEqual(win.input.text(), "")
+        mock_engine.speak.assert_called_once_with("SCHREI", force_scream=True)
+
+        mock_engine.reset_mock()
+        win.input.setText("   ")
+        win.send_text()
+        mock_engine.speak.assert_not_called()
+
+    def test_legacy_config_normalization_and_canonical_precedence(self):
+        from tts.app import CompactTTSWindow, _normalize_canonical_config
+
+        legacy_only = {
+            "voice_id": "sapi:Hedda",
+            "speech_rate": 3,
+            "normal_mic_volume": 125,
+            "mic_device": "USB Mic",
+        }
+        norm = _normalize_canonical_config(legacy_only)
+        self.assertEqual(norm["voice"], "sapi:Hedda")
+        self.assertEqual(norm["rate"], 3)
+        self.assertEqual(norm["virtual_volume"], 125)
+        self.assertEqual(norm["input_device"], "USB Mic")
+
+        win_legacy = CompactTTSWindow(initial_config=legacy_only, smoke=True)
+        self.addCleanup(win_legacy.cleanup)
+        self.assertEqual(win_legacy._config["voice"], "sapi:Hedda")
+        self.assertEqual(win_legacy._config["rate"], 3)
+        self.assertEqual(win_legacy._config["virtual_volume"], 125)
+        self.assertEqual(win_legacy._config["input_device"], "USB Mic")
+
+        both = {
+            "voice": "winsdk:Katja",
+            "voice_id": "sapi:Hedda",
+            "rate": -2,
+            "speech_rate": 4,
+            "virtual_volume": 90,
+            "normal_mic_volume": 135,
+            "input_device": "HyperX",
+            "mic_device": "AltMic",
+        }
+        win_canon = CompactTTSWindow(initial_config=both, smoke=True)
+        self.addCleanup(win_canon.cleanup)
+        self.assertEqual(win_canon._config["voice"], "winsdk:Katja")
+        self.assertEqual(win_canon._config["rate"], -2)
+        self.assertEqual(win_canon._config["virtual_volume"], 90)
+        self.assertEqual(win_canon._config["input_device"], "HyperX")
+
+        win_canon._apply_config_update({
+            "voice_id": "sapi:Other",
+            "speech_rate": 1,
+            "normal_mic_volume": 75,
+            "mic_device": "OtherMic",
+        })
+        self.assertEqual(win_canon._config["voice"], "winsdk:Katja")
+        self.assertEqual(win_canon._config["rate"], -2)
+        self.assertEqual(win_canon._config["virtual_volume"], 90)
+        self.assertEqual(win_canon._config["input_device"], "HyperX")
+
+        ctx = ResetContext()
+        ext = ctx.extensions.items["tts_for_windows"]
+        tts_cfg = ctx.config.data["extensions"]["tts_for_windows"]
+        tts_cfg.pop("voice", None)
+        tts_cfg["voice_id"] = "sapi:Legacy"
+        self.assertEqual(ext.option("voice"), "sapi:Legacy")
+        tts_cfg["voice"] = "winsdk:Canonical"
+        self.assertEqual(ext.option("voice"), "winsdk:Canonical")
+# --- [Antigravity Ende] ---
+
+
+class DragHoverSwitch(unittest.TestCase):
+    """Hinhalten beim Ziehen: Die Uhr läuft nur bei einem neuen Ziel an und löst genau einmal aus."""
+
+    def test_same_target_does_not_restart_and_leave_cancels(self):
+        from ui.drag_switch import DragHover
+        hover = DragHover(hold_ms=10_000)
+        seen = []
+        hover.held.connect(seen.append)
+        first, second = object(), object()
+        hover.over(first)
+        left = hover._timer.remainingTime()
+        hover.over(first)
+        self.assertLessEqual(hover._timer.remainingTime(), left)  # nicht neu gestartet
+        hover._fire()
+        self.assertEqual(seen, [first])
+        hover.over(second)
+        self.assertTrue(hover._timer.isActive())
+        hover.leave()
+        self.assertFalse(hover._timer.isActive())
+        self.assertFalse(hover.active())
+        hover._fire()
+        self.assertEqual(seen, [first])  # nach dem Verlassen löst nichts mehr aus
+
+    def test_tab_index_zero_counts_as_target(self):
+        from ui.drag_switch import DragHover
+        hover = DragHover(hold_ms=10_000)
+        seen = []
+        hover.held.connect(seen.append)
+        hover.over(0)
+        self.assertTrue(hover.active())
+        hover._fire()
+        self.assertEqual(seen, [0])
+
+
+class QuickAnswers(unittest.TestCase):
+    def test_calculator_only_calculates(self):
+        from core.quick_answers import calculate
+        self.assertEqual(calculate("12*3+4"), "40")
+        self.assertEqual(calculate("2^10"), "1024")
+        self.assertEqual(calculate("15% von 80"), "12")
+        self.assertEqual(calculate("1,5+1"), "2,5")
+        self.assertEqual(calculate("sqrt(16)"), "4")
+        for text in ("2024", "chrome", "7zip", "__import__('os')", "open('x')", "1/0", "9**9**9", "(1).__class__", "x+1", "-5"):
+            self.assertIsNone(calculate(text), text)
+
+    def test_units_convert_only_within_one_kind(self):
+        from core.quick_answers import convert
+        self.assertEqual(convert("3 gb in mb"), "3072 mb")
+        self.assertEqual(convert("2 h in min"), "120 min")
+        self.assertEqual(convert("0 c in k"), "273.15 k")
+        self.assertEqual(convert("1,5 kg in g"), "1500 g")
+        self.assertIsNone(convert("5 km in kg"))
+        self.assertIsNone(convert("hallo in welt"))
+
+    def test_timer_and_prefixes(self):
+        from core import quick_answers
+        self.assertEqual(quick_answers.timer_minutes("timer 10"), 10)
+        self.assertIsNone(quick_answers.timer_minutes("timer"))
+        self.assertIsNone(quick_answers.timer_minutes("timer 999"))
+        self.assertEqual(quick_answers.split_web_prefix("w wetter"), "wetter")
+        self.assertIsNone(quick_answers.split_web_prefix("wetter"))
+        self.assertEqual(quick_answers.split_clip_prefix("v abc"), "abc")
+        self.assertIsNone(quick_answers.split_clip_prefix("vlc"))
+        self.assertEqual(quick_answers.web_search_url("a b&c", "google"), "https://www.google.com/search?q=a+b%26c")
+
+    def test_clip_history_keeps_newest_without_duplicates(self):
+        from core.quick_answers import ClipHistory
+        history = ClipHistory(3)
+        for text in ("a", "b", "", "a", "c", "d", "x" * 20000):
+            history.add(text)
+        self.assertEqual(history.items, ["d", "c", "a"])
+        self.assertEqual(history.search("C"), ["c"])
+
+    def test_file_index_finds_names_and_skips_deep_and_hidden(self):
+        from core.quick_answers import FileIndex
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        for name in ("Rechnung 2024.pdf", "a/rechnung alt.pdf", "a/b/c/d/zu_tief.txt", "node_modules/rechnung.js", ".git/rechnung"):
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text("", encoding="utf-8")
+        index = FileIndex([str(root)])
+        index.build()
+        self.assertEqual([Path(p).name for p in index.search("rechnung")], ["rechnung alt.pdf", "Rechnung 2024.pdf"])
+        self.assertEqual(index.search("tief"), [])
+        self.assertEqual(index.search("re"), [])  # zu kurz
+
+
+class WindowTilesAndSchedule(unittest.TestCase):
+    def test_tiles_meet_without_gaps(self):
+        from core.window_tiles import next_window, tile_rect
+        area = (0, 40, 2561, 1400)
+        left, right = tile_rect(area, "left"), tile_rect(area, "right")
+        self.assertEqual(left[0] + left[2], right[0])
+        self.assertEqual(right[0] + right[2], 2561)
+        top, bottom = tile_rect(area, "top_right"), tile_rect(area, "bottom_right")
+        self.assertEqual(top[1] + top[3], bottom[1])
+        self.assertEqual(next_window([5, 6, 7], 7, 1), 5)
+        self.assertEqual(next_window([5, 6, 7], 5, -1), 7)
+        self.assertEqual(next_window([5, 6], 9, 1), 5)
+        self.assertEqual(next_window([], 1, 1), 0)
+
+    def test_mode_follows_the_clock_also_across_midnight(self):
+        from core.schedule import mode_for, parse_clock
+        self.assertEqual(parse_clock("7:30", 0), 450)
+        self.assertEqual(parse_clock("quatsch", 5), 5)
+        self.assertEqual(mode_for(600, 420, 1140), "light")
+        self.assertEqual(mode_for(1140, 420, 1140), "dark")
+        self.assertEqual(mode_for(60, 1200, 300), "light")
+        self.assertEqual(mode_for(600, 1200, 300), "dark")
+
+    def test_rotation_starts_at_the_choice_and_shows_each_once(self):
+        from core.schedule import rotation_pick
+        choices = ["a", "b", "c"]
+        self.assertEqual([rotation_pick(choices, "b", minute, 10, False) for minute in (0, 10, 25)], ["b", "c", "a"])
+        mixed = [rotation_pick(choices, "b", step * 10, 10, True, seed=4) for step in range(3)]
+        self.assertEqual(mixed[0], "b")
+        self.assertEqual(sorted(mixed), choices)
+
+    def test_task_state_changes_with_title_focus_and_minimize(self):
+        from ui.taskbar import task_state
+        window = unittest.mock.Mock(hwnd=1, title="a")
+        groups = {"x.exe": {"target": "x", "name": "", "windows": [window]}}
+        minimized = {1: False}
+        base = task_state(groups, 1, minimized.get, [], (False,))
+        self.assertEqual(base, task_state(groups, 1, minimized.get, [], (False,)))
+        self.assertNotEqual(base, task_state(groups, 2, minimized.get, [], (False,)))
+        minimized[1] = True
+        self.assertNotEqual(base, task_state(groups, 1, minimized.get, [], (False,)))
+
+
+class WallpaperSavings(unittest.TestCase):
+    def test_big_gifs_are_not_cached(self):
+        self.assertFalse(wallpapers.gif_fits_cache(100, 2560, 1440))
+        self.assertTrue(wallpapers.gif_fits_cache(5, 1920, 1080))
+        self.assertFalse(wallpapers.gif_fits_cache(0, 10, 10))
+
+    def test_pauses_when_nobody_can_see_it(self):
+        play = wallpapers.should_play
+        self.assertTrue(play(False, [False, True], False, "cb"))  # ein Bildschirm ist frei
+        self.assertFalse(play(False, [True, True], False, "cb"))
+        self.assertTrue(play(False, [True], False, "b"))  # Verdecken zählt nur, wenn eingeschaltet
+        self.assertFalse(play(True, [], False, ""))
+        self.assertFalse(play(False, [False], True, "b"))
+        self.assertEqual(wallpapers.pause_flags({"pause_covered": False, "pause_on_battery": True}), "b")
+
+
+class SettingsBackups(unittest.TestCase):
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.path = self.folder / "settings.json"
+
+    def _save(self, number: int, stamp: str):
+        from config import config_manager
+        self.path.write_text(json.dumps({"n": number}), encoding="utf-8")
+        return config_manager.backup_settings(self.path, stamp=stamp)
+
+    def test_keeps_five_and_skips_unchanged_or_broken(self):
+        from config import config_manager
+        for number in range(7):
+            self.assertIsNotNone(self._save(number, f"2026111{number}-120000"))
+        self.assertIsNone(config_manager.backup_settings(self.path, stamp="20261120-120000"))  # unverändert
+        self.path.write_text("{kaputt", encoding="utf-8")
+        self.assertIsNone(config_manager.backup_settings(self.path, stamp="20261121-120000"))
+        names = [file.name for file in config_manager.list_backups(self.folder / "backups")]
+        self.assertEqual(len(names), 5)
+        self.assertEqual(names[0], "settings-20261116-120000.json")
+
+    def test_broken_settings_fall_back_to_newest_backup(self):
+        self._save(3, "20261111-120000")
+        self.path.write_text("{kaputt", encoding="utf-8")
+        self.assertEqual(ConfigManager(self.path).data["n"], 3)
+
+    def test_restore_keeps_the_saved_taskbar_state(self):
+        from config import config_manager
+        backup = self._save(1, "20261111-120000")
+        config = ConfigManager(self.path)
+        config.data["shell"]["saved_taskbar_state"] = 2
+        config.data["n"] = 9
+        config_manager.restore_backup(config, backup)
+        self.assertEqual(config.data["n"], 1)
+        self.assertEqual(config.data["shell"]["saved_taskbar_state"], 2)
 
 
 if __name__ == "__main__":

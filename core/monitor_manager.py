@@ -37,9 +37,13 @@ class MonitorManager(QObject):
     def __init__(self):
         super().__init__()
         app = QGuiApplication.instance()
-        app.screenAdded.connect(lambda _s: self.screens_changed.emit())
-        app.screenRemoved.connect(lambda _s: self.screens_changed.emit())
-        app.primaryScreenChanged.connect(lambda _s: self.screens_changed.emit())
+        app.screenAdded.connect(self._on_screen_change)
+        app.screenRemoved.connect(self._on_screen_change)
+        app.primaryScreenChanged.connect(self._on_screen_change)
+
+    def _on_screen_change(self, _screen=None) -> None:
+        win_api.invalidate_monitor_cache()
+        self.screens_changed.emit()
 
     @staticmethod
     def screens() -> list[QScreen]:

@@ -15,14 +15,14 @@ from PySide6.QtGui import QCursor, QGuiApplication
 
 from core import system_status
 from core import win_api
-from core.dev import dev_menu_wanted, open_dev_menu
+from core.dev import dev_label, dev_menu_wanted, open_dev_menu
 from core.gemini_client import TranscribeWorker
 from core.monitor_manager import native_point, native_rect
 
 log = logging.getLogger(__name__)
 
 RECENT_SECONDS = 15 * 60
-DEV_GLYPH = ""  # DeveloperTools aus der Windows-Symbolschrift
+DEV_GLYPH = ""  # Symbol aus der Windows-Symbolschrift
 _PARTIAL = (".crdownload", ".part", ".tmp", ".partial", ".download")
 _URL = re.compile(r"^https?://\S+$", re.I)
 SAMPLE_RATE = 16000
@@ -68,8 +68,10 @@ def typed_actions(ctx, query: str) -> list[Suggestion]:
                         lambda: ctx.status.set_wifi(not wifi)))
     found = [Suggestion(label, action) for words, label, action in entries
              if any(word.startswith(text) or text.startswith(word) for word in words)]
-    if dev_menu_wanted(text):  # nur im Dev-Build; die PIN fragt das Menü selbst
-        found.insert(0, Suggestion("Dev-Menü", lambda: open_dev_menu(ctx), DEV_GLYPH))
+    if dev_menu_wanted(text):
+        title = dev_label("menu_title")
+        if title:
+            found.insert(0, Suggestion(title, lambda: open_dev_menu(ctx), DEV_GLYPH))
     if any(word.startswith(text) or text.startswith(word) for word in OUTPUT_WORDS):
         found += [Suggestion(f"Audio auf {device.name} umstellen", lambda d=device.id: system_status.set_audio_output(d))
                   for device in system_status.audio_outputs() if not device.active]

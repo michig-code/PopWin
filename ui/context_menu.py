@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import shutil
 
+import shiboken6
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QPushButton, QWidget, QWidgetAction
 
@@ -46,8 +47,8 @@ class ContextMenu(QMenu):
         self._extra_menus: list[QMenu] = []
         self.shell: win_api.ShellMenu | None = None
         self.aboutToHide.connect(self._release_shell)
-        self.animator = WindowAnimator(ctx, self)
-        self.aboutToHide.connect(lambda: fade_ghost(ctx, self))
+        self.animator = WindowAnimator(ctx, self, scale=0.65, max_reduced=60)
+        self.aboutToHide.connect(lambda: shiboken6.isValid(self) and fade_ghost(ctx, self))
 
     def submenu(self, title: str) -> QMenu:
         """Klappt seitlich auf und sieht aus wie das Hauptmenü."""

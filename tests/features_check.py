@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QPoint, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QGuiApplication
 
 import main as popwin_main
@@ -24,7 +24,6 @@ from core.monitor_manager import screen_key
 from ui.task_panel import STATUS
 from ui.taskbar import Dock
 from ui.topbar import TopBar
-from ui.window_frame import HTCAPTION, HTMAXBUTTON
 
 out = Path(sys.argv[1])
 out.mkdir(parents=True, exist_ok=True)
@@ -235,14 +234,8 @@ def steps(ctx, app):
         check("Einstellungen öffnen", settings.isVisible())
         style = win_api.user32.GetWindowLongPtrW(int(settings.winId()), -16)
         check("Bleibt ein echtes Windows-Fenster", bool(style & 0x40000) and bool(style & 0xC00000), hex(style))
-        rect = win_api.window_rect(int(settings.winId()))
-        title = settings.titlebar
-        ratio = settings.devicePixelRatio()
-        point = title.mapTo(settings, title.maximize.geometry().center())
-        lparam = lambda x, y: ((rect[1] + y) << 16) | ((rect[0] + x) & 0xFFFF)
-        check("Maximieren-Knopf meldet Snap-Layouts", settings._hit_test(lparam(round(point.x() * ratio), round(point.y() * ratio))) == HTMAXBUTTON)
-        drag = title.mapTo(settings, QPoint(title.title.geometry().right() + 8, 10))
-        check("Titelleiste lässt sich ziehen", settings._hit_test(lparam(round(drag.x() * ratio), round(drag.y() * ratio))) == HTCAPTION)
+        # Seit der Überarbeitung zeichnet Windows Titelleiste, Snap-Layouts und Ziehen selbst (system_frame=True).
+        check("Echte Windows-Titelleiste statt eigener", settings.titlebar is None)
         settings.search.setText("icon")
         yield 300
         check("Suche findet Einstellungen", settings.hits.count() >= 2, settings.hits.item(0).text() if settings.hits.count() else "")

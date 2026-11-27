@@ -5,10 +5,11 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from config import config_manager
@@ -22,15 +23,16 @@ from core.nova_voice import VOICES
 from core.paths import DATA_DIR, app_shortcut
 from core.process_trim import CANDIDATES
 from core.replacements import REPLACEMENTS
-from core.theme_manager import NOVA_CLASSICS
+from core.theme_manager import NOVA_CLASSICS, THEME_DIR
 from ui.theme_page import ThemePage
 from extensions import USER_FOLDER
 from ui import desktop_groups
+from ui.animation import animation_duration
 from ui.audio_mixer import AudioMixer
 from ui.stat_pages import CachePanel, NetworkStats, PerformanceStats
 from ui.audio_outputs import AudioOutputs
 from ui.base import G, ScrollFields, glyph_icon, resettable
-from core.dev import dev_menu_wanted, is_dev, open_dev_menu
+from core.dev import dev_label, dev_menu_wanted, is_dev, open_dev_menu
 from core.updater import NO_RELEASE
 from core.version import REPO, VERSION
 from ui.clock_place import PLACES, PlacePicker
@@ -44,9 +46,194 @@ from ui.widgets import WIDGET_LABELS
 from ui.window_frame import NativeWindow, fade_in_page
 
 ROOT = Path(__file__).resolve().parent.parent
-DEV_HIT = -1  # Suchtreffer, der kein Tab ist, sondern das Dev-Menü
+DEV_HIT = -1  # Suchtreffer für eine optionale Zusatz-Ansicht (kein Tab)
 EDGE_LABELS = {1: "Stufe 1: nur ganz am Rand, mit Verzögerung", 2: "Stufe 2: am Rand, etwas verzögert", 3: "Stufe 3: normal",
                4: "Stufe 4: schon vor dem Rand, schnell", 5: "Stufe 5: weit vor dem Rand, sofort"}
+
+GLYPH_ROLE = Qt.ItemDataRole.UserRole
+SECTION_ROLE = Qt.ItemDataRole.UserRole + 1
+CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 2
+LABEL_ROLE = Qt.ItemDataRole.UserRole + 3
+
+PAGE_ALIASES: dict[str, str] = {
+    "setup": "Einrichtung",
+    "einrichtung": "Einrichtung",
+    "ersteinrichtung": "Einrichtung",
+    "autostart": "Einrichtung",
+    "design": "Design",
+    "theme": "Design",
+    "themes": "Themes",
+    "theme-editor": "Themes",
+    "eigenes theme": "Themes",
+    "kacheln": "Themes",
+    "übersicht": "Übersicht",
+    "overview": "Übersicht",
+    "start": "Übersicht",
+    "allgemein": "Design",
+    "teilen": "Teilen & Presets",
+    "teilen & presets": "Teilen & Presets",
+    "presets": "Teilen & Presets",
+    "preset": "Teilen & Presets",
+    "backup": "Teilen & Presets",
+    "backups": "Teilen & Presets",
+    "export": "Teilen & Presets",
+    "import": "Teilen & Presets",
+    "rechtsklick-menü": "Kontextmenü",
+    "suche mit ki": "KI",
+    "spielmodus": "Performance",
+    "windows entlasten": "Performance",
+    "aussehen": "Design",
+    "erscheinungsbild": "Design",
+    "sprache": "Design",
+    "animationen": "Design",
+    "hintergrund": "Hintergrund",
+    "wallpaper": "Hintergrund",
+    "fondo": "Hintergrund",
+    "fond d'écran": "Hintergrund",
+    "monitore": "Taskbar",
+    "monitors": "Taskbar",
+    "bildschirme": "Taskbar",
+    "displays": "Taskbar",
+    "topbar": "Topbar",
+    "top-leiste": "Topbar",
+    "taskbar": "Taskbar",
+    "dock": "Taskbar",
+    "leiste": "Taskbar",
+    "uhr": "Uhr",
+    "clock": "Uhr",
+    "reloj": "Uhr",
+    "horloge": "Uhr",
+    "startmenü": "Startmenü",
+    "start menu": "Startmenü",
+    "home": "Startmenü",
+    "home-menü": "Startmenü",
+    "widgets": "Widgets",
+    "kontextmenü": "Kontextmenü",
+    "context menu": "Kontextmenü",
+    "rechtsklickmenü": "Kontextmenü",
+    "launcher": "Launcher",
+    "suche": "Launcher",
+    "search": "Launcher",
+    "nova": "Nova",
+    "ki": "KI",
+    "ai": "KI",
+    "ia": "KI",
+    "gemini": "KI",
+    "audio": "Audio",
+    "ton": "Audio",
+    "lautstärke": "Audio",
+    "benachrichtigungen": "Benachrichtigungen",
+    "notifications": "Benachrichtigungen",
+    "notificaciones": "Benachrichtigungen",
+    "netzwerk": "Netzwerk",
+    "network": "Netzwerk",
+    "red": "Netzwerk",
+    "réseau": "Netzwerk",
+    "performance": "Performance",
+    "leistung": "Performance",
+    "cache": "Performance",
+    "rendimiento": "Performance",
+    "performances": "Performance",
+    "datenschutz": "Datenschutz",
+    "privacy": "Datenschutz",
+    "privacidad": "Datenschutz",
+    "confidentialité": "Datenschutz",
+    "erweiterungen": "Erweiterungen",
+    "extensions": "Erweiterungen",
+    "plugins": "Erweiterungen",
+    "beta": "Beta",
+    "bêta": "Beta",
+    "experimentell": "Beta",
+    "desktop-system": "Beta",
+}
+
+THEME_PALETTES: dict[str, dict[str, tuple[str, str, str, str, str]]] = {
+    "aurora": {
+        "dark": ("#131722", "#1A2030", "#F1F5FD", "#4EE2C0", "#6CA8FF"),
+        "light": ("#F2F5FA", "#FFFFFF", "#121826", "#0D9488", "#2563EB"),
+    },
+    "liquid_glass": {
+        "dark": ("#1B1F28", "#262B36", "#FFFFFF", "#8FE3FF", "#3C4454"),
+        "light": ("#EEF1F6", "#FFFFFF", "#14171D", "#0078B8", "#D5DCE8"),
+    },
+    "pop_basic": {
+        "dark": ("#222222", "#2B2B2B", "#F2F2F2", "#48B9C7", "#F18A00"),
+        "light": ("#F2EFE9", "#FAF8F4", "#2B2B2B", "#16808E", "#C96F00"),
+    },
+    "clean": {
+        "dark": ("#121212", "#181818", "#EDEDED", "#FFFFFF", "#2B2B2B"),
+        "light": ("#FAFAFA", "#FFFFFF", "#1A1A1A", "#1A1A1A", "#EAEAEA"),
+    },
+    "minimalist": {
+        "dark": ("#0D0D0D", "#161616", "#D8D8D8", "#D8D8D8", "#222222"),
+        "light": ("#F4F4F4", "#FFFFFF", "#202020", "#202020", "#E4E4E4"),
+    },
+}
+
+THEME_DESCRIPTIONS: dict[str, str] = {
+    "aurora": "Modernes Polarlicht-Design mit satiniertem Glas und hohem Kontrast.",
+    "liquid_glass": "Das klassische PopWin-Glasdesign mit hellem, transparentem Acrylic-Look.",
+    "pop_basic": "Klare, direkte Flächen im Stil von Pop!_OS.",
+    "clean": "Aufgeräumter, schlichter Stil mit ruhigen Farben.",
+    "minimalist": "Reduziertes, flaches Design ohne visuelle Ablenkung.",
+}
+
+_SETTINGS_FALLBACK_QSS = """
+#SettingsHeader {
+    background: rgba(128, 128, 128, 0.06);
+    border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+}
+[popMode="light"] #SettingsHeader {
+    background: rgba(0, 0, 0, 0.03);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.10);
+}
+#SettingsPageTitle {
+    font-family: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI";
+    font-size: 18px;
+    font-weight: 600;
+}
+#SettingsNav {
+    background: rgba(128, 128, 128, 0.05);
+    border: none;
+    border-right: 1px solid rgba(128, 128, 128, 0.20);
+    padding: 8px 6px;
+    outline: none;
+}
+[popMode="light"] #SettingsNav {
+    background: rgba(0, 0, 0, 0.025);
+    border-right: 1px solid rgba(0, 0, 0, 0.10);
+}
+#SettingsNav::item {
+    padding: 8px 12px;
+    border-radius: 8px;
+    margin: 1px 0;
+}
+#SettingsNav::item:disabled,
+#SettingsNav::item:disabled:hover {
+    background: transparent;
+    color: rgba(160, 160, 160, 0.72);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 12px 12px 4px 12px;
+}
+[popMode="light"] #SettingsNav::item:disabled {
+    color: rgba(70, 70, 70, 0.68);
+}
+#ThemePreview {
+    background: rgba(128, 128, 128, 0.10);
+    border: 1px solid rgba(128, 128, 128, 0.22);
+    border-radius: 10px;
+    padding: 8px 10px;
+}
+[popMode="light"] #ThemePreview {
+    background: rgba(0, 0, 0, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.12);
+}
+#ThemeSwatch {
+    border-radius: 4px;
+    border: 1px solid rgba(128, 128, 128, 0.35);
+}
+"""
 
 
 class Page(QScrollArea):
@@ -55,8 +242,8 @@ class Page(QScrollArea):
         self.setWidgetResizable(True)
         self.setFrameShape(QScrollArea.Shape.NoFrame)
         inner = QWidget(objectName="SettingsPage")
-        self.box = ColumnLayout(inner)
-        self.box.setContentsMargins(16, 14, 16, 14)
+        self.box = ColumnLayout(inner, spacing=14)
+        self.box.setContentsMargins(20, 16, 20, 20)
         self._last_form: QFormLayout | None = None
         self.setWidget(inner)
         inner.installEventFilter(self)
@@ -80,7 +267,7 @@ class Page(QScrollArea):
         box = QGroupBox(title)
         form = QFormLayout(box)
         form.setHorizontalSpacing(16)
-        form.setVerticalSpacing(8)
+        form.setVerticalSpacing(10)
         if full:
             self.box.add_full(box)
         else:
@@ -103,30 +290,6 @@ class Page(QScrollArea):
 
 PAGE_ROLE = Qt.ItemDataRole.UserRole + 1  # welche Seite ein Eintrag der Navigation öffnet; Überschriften haben keine
 
-# Neues Einstellungsmenü (Beta): Seiten nach Themen gruppiert, mit Überschriften in der Navigation
-NAV_GROUPS = (
-    ("Start", ("Übersicht",)),
-    ("Aussehen", ("Themes", "Hintergrund", "Uhr", "Widgets")),
-    ("Leisten und Menüs", ("Topbar", "Taskbar", "Startmenü", "Rechtsklick-Menü")),
-    ("System", ("Benachrichtigungen", "Audio", "Netzwerk", "Leistung", "Datenschutz")),
-    ("KI und Suche", ("Nova", "Suche", "Suche mit KI")),
-    ("PopWin", ("Allgemein", "Setup", "Teilen & Presets", "Erweiterungen", "Beta")),
-)
-
-
-def grouped_nav(labels: list[str], groups=NAV_GROUPS) -> list[tuple[str, bool]]:
-    """Reihenfolge der Navigation: (Text, ist Überschrift). Seiten ohne Gruppe landen am Ende unter der letzten."""
-    known = {label for _title, members in groups for label in members}
-    rows: list[tuple[str, bool]] = []
-    for number, (title, members) in enumerate(groups):
-        present = [label for label in members if label in labels]
-        if number == len(groups) - 1:
-            present += [label for label in labels if label not in known]
-        if present:
-            rows.append((title, True))
-            rows += [(label, False) for label in present]
-    return rows
-
 
 class PageStack(QStackedWidget):
     """Seiten mit Navigation an der Seite; kennt die Namen für Suche und direkte Sprünge."""
@@ -135,16 +298,30 @@ class PageStack(QStackedWidget):
         super().__init__()
         self.nav = nav
         self.window_ref = window
-        self._order: list[QListWidgetItem] = []  # Einträge in der klassischen Reihenfolge
+        self._page_to_row: list[int] = []
+        self._row_to_page: dict[int, int] = {}
+        self._current_category: str = ""
         nav.currentRowChanged.connect(self._show_row)
 
-    def addTab(self, page: QWidget, label: str, glyph: str = "") -> int:
-        index = self.addWidget(page)
-        item = QListWidgetItem(label)
-        item.setData(Qt.ItemDataRole.UserRole, glyph)
-        item.setData(PAGE_ROLE, index)
+    def addSection(self, title: str) -> None:
+        self._current_category = title
+        item = QListWidgetItem(i18n.translate(title).upper())  # erst übersetzen, dann großschreiben
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setData(SECTION_ROLE, True)
+        item.setData(CATEGORY_ROLE, title)
         self.nav.addItem(item)
-        self._order.append(item)
+
+    def addTab(self, page: QWidget, label: str, glyph: str = "", category: str | None = None) -> int:
+        index = self.addWidget(page)
+        row = self.nav.count()
+        item = QListWidgetItem(label)
+        item.setData(GLYPH_ROLE, glyph)
+        item.setData(SECTION_ROLE, False)
+        item.setData(CATEGORY_ROLE, category or self._current_category)
+        item.setData(LABEL_ROLE, label)
+        self.nav.addItem(item)
+        self._page_to_row.append(row)
+        self._row_to_page[row] = index
         return index
 
     def _item(self, index: int) -> QListWidgetItem | None:
@@ -157,126 +334,146 @@ class PageStack(QStackedWidget):
         return -1
 
     def tabText(self, index: int) -> str:
-        item = self._item(index)
-        return item.text() if item else ""
+        return self.nav.item(self._page_to_row[index]).text()
+
+    def tabLabel(self, index: int) -> str:
+        item = self.nav.item(self._page_to_row[index])
+        return item.data(LABEL_ROLE) or item.text()
+
+    def tabGlyph(self, index: int) -> str:
+        return self.nav.item(self._page_to_row[index]).data(GLYPH_ROLE) or ""
+
+    def tabCategory(self, index: int) -> str:
+        return self.nav.item(self._page_to_row[index]).data(CATEGORY_ROLE) or ""
 
     def setCurrentIndex(self, index: int) -> None:
-        self.nav.setCurrentRow(self._row(index))
+        if 0 <= index < len(self._page_to_row):
+            self.nav.setCurrentRow(self._page_to_row[index])
 
     def setCurrentWidget(self, page: QWidget) -> None:
         self.setCurrentIndex(self.indexOf(page))
 
-    def set_visible_tab(self, index: int, visible: bool) -> None:
-        item = self._item(index)
-        if item is not None:
-            item.setHidden(not visible)
-
-    def arrange(self, grouped: bool) -> None:
-        """Klassisch: alle Seiten untereinander. Neu: nach Themen mit Überschriften."""
-        current = self.currentIndex()
-        self.nav.blockSignals(True)
-        while self.nav.count():
-            self.nav.takeItem(0)
-        if grouped:
-            by_label = {item.text(): item for item in self._order}
-            for text, header in grouped_nav(list(by_label)):
-                if header:
-                    head = QListWidgetItem(text.upper())
-                    head.setFlags(Qt.ItemFlag.NoItemFlags)
-                    font = head.font()
-                    font.setPointSizeF(max(7.0, font.pointSizeF() - 1.5))
-                    font.setBold(True)
-                    head.setFont(font)
-                    self.nav.addItem(head)
-                else:
-                    self.nav.addItem(by_label[text])
-        else:
-            for item in self._order:
-                self.nav.addItem(item)
-        self.nav.blockSignals(False)
-        self.setCurrentIndex(current)
-
     def _show_row(self, row: int) -> None:
-        item = self.nav.item(row) if row >= 0 else None
-        index = item.data(PAGE_ROLE) if item is not None else None
-        if index is not None:
-            super().setCurrentIndex(index)
-            fade_in_page(self.widget(index).viewport(), self.window_ref.page_fade())
+        page_index = self._row_to_page.get(row)
+        if page_index is None:
+            return
+        super().setCurrentIndex(page_index)
+        self.window_ref._update_header(page_index)
+        self.window_ref._refresh_nav_icons()
+        fade_in_page(self.widget(page_index).viewport(), self.window_ref.page_fade())
 
 
 class SettingsWindow(NativeWindow):
     def __init__(self, ctx):
-        super().__init__(ctx, "PopWin Einstellungen", "apps/settings")
-        self.resize(940, 680)
+        super().__init__(ctx, "PopWin Einstellungen", "apps/settings", system_frame=True)
+        self.resize(1020, 700)
+        self.setMinimumSize(720, 480)
+
+        root = QVBoxLayout(self.content)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.header = QWidget(objectName="SettingsHeader")
+        self.header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.header.setFixedHeight(52)
+        header_row = QHBoxLayout(self.header)
+        header_row.setContentsMargins(20, 8, 20, 8)
+        header_row.setSpacing(12)
+        self.page_icon = QLabel()
+        self.page_icon.setFixedSize(20, 20)
+        self.page_title = QLabel(objectName="SettingsPageTitle")
+        self.page_category = QLabel(objectName="Muted")
+        header_row.addWidget(self.page_icon)
+        header_row.addWidget(self.page_title)
+        header_row.addWidget(self.page_category)
+        header_row.addStretch(1)
         self.search = QLineEdit(objectName="TitleSearch")
         self.search.setPlaceholderText("Einstellung suchen oder ? für KI")
-        self.search.setMaximumWidth(420)
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(260)
+        self.search.setMaximumWidth(380)
+        self.search.setFixedHeight(34)
         self.search.textChanged.connect(self._search_changed)
         self.search.returnPressed.connect(self._search_accept)
-        self.titlebar.middle.addStretch(1)
-        self.titlebar.middle.addWidget(self.search, 3)
-        self.titlebar.middle.addStretch(1)
+        header_row.addWidget(self.search)
+        root.addWidget(self.header)
 
-        row = QHBoxLayout(self.content)
-        row.setContentsMargins(10, 4, 0, 0)
-        row.setSpacing(6)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        root.addLayout(row, 1)
         nav = QListWidget(objectName="SettingsNav")
-        nav.setFixedWidth(190)
+        nav.setFixedWidth(224)
         nav.setIconSize(QSize(18, 18))
         nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tabs = PageStack(nav, self)
         row.addWidget(nav)
         row.addWidget(self.tabs, 1)
+
         self._taskbar_monitor = ""
         self._topbar_monitor = ""
         self._clock_monitor = ""
+        self._monitor_key = ""
+        self._monitor_numbers = MonitorNumbers()
+
+        self.tabs.addSection("Allgemein")
+        self.setup_tab = self.tabs.addTab(self._setup_page(), "Einrichtung", G.SETTINGS)
         self.overview_tab = self.tabs.addTab(self._overview_page(), "Übersicht", G.WINDOWS)
-        self.tabs.addTab(self._themes_page(), "Themes", G.PERSONALIZE)
-        self.tabs.addTab(self._design_page(), "Allgemein", G.SETTINGS)
+        self.design_tab = self.tabs.addTab(self._design_page(), "Design", G.PERSONALIZE)
+        self.tabs.addTab(self._themes_page(), "Themes", G.DARK)
+        self.tabs.addTab(self._wallpaper_page(), "Hintergrund", G.WALLPAPER)
+
+        self.tabs.addSection("Leisten & Monitore")
+        # Monitore stehen seit 4.0 direkt auf den Seiten Topbar und Taskbar (je eine Bildschirm-Karte)
         self.tabs.addTab(self._topbar_page(), "Topbar", G.DISPLAY)
         self.tabs.addTab(self._bars_page(), "Taskbar", G.APP)
         self.tabs.addTab(self._clock_page(), "Uhr", G.CLOCK)
-        self.tabs.addTab(self._notifications_page(), "Benachrichtigungen", G.BELL)
-        self.tabs.addTab(self._audio_page(), "Audio", G.VOLUME)
-        self.tabs.addTab(self._wallpaper_page(), "Hintergrund", G.PERSONALIZE)
-        self.tabs.addTab(self._menu_page(), "Rechtsklick-Menü", G.LIST)
-        self.tabs.addTab(self._launcher_page(), "Suche", G.SEARCH)
-        self.tabs.addTab(self._ai_page(), "Suche mit KI", G.QUICK)
+
+        self.tabs.addSection("Menüs & Widgets")
         self.tabs.addTab(self._start_page(), "Startmenü", G.START)
         self.widget_page = Page()
         self.tabs.addTab(self.widget_page, "Widgets", G.WIDGETS)
+        self.tabs.addTab(self._menu_page(), "Kontextmenü", G.LIST)
+
+        self.tabs.addSection("Suche & KI")
+        self.tabs.addTab(self._launcher_page(), "Launcher", G.SEARCH)
         self.tabs.addTab(self._nova_page(), "Nova", G.NOVA)
+        self.tabs.addTab(self._ai_page(), "KI", G.QUICK)
+
+        self.tabs.addSection("System & Medien")
+        self.tabs.addTab(self._audio_page(), "Audio", G.VOLUME)
+        self.tabs.addTab(self._notifications_page(), "Benachrichtigungen", G.BELL)
         self.tabs.addTab(self._network_page(), "Netzwerk", G.ETHERNET)
-        self.tabs.addTab(self._performance_page(), "Leistung", G.QUICK)
+        self.tabs.addTab(self._performance_page(), "Performance", G.CPU)
+
+        self.tabs.addSection("Datenschutz & Erweitert")
         self.tabs.addTab(self._privacy_page(), "Datenschutz", G.LOCK)
-        self.tabs.addTab(self._beta_page(), "Beta", G.QUICK)
         self.extensions_page = Page()
         self.tabs.addTab(self.extensions_page, "Erweiterungen", G.ADD)
         self._fill_extensions()
         self.tabs.addTab(self._share_page(), "Teilen & Presets", G.SEND)
-        self.setup_tab = self.tabs.addTab(self._setup_page(), "Setup", G.SETTINGS)
-        self._apply_look()
-        ctx.config.changed.connect(lambda key: key == "settings_v2" and self._apply_look())
+        self.tabs.addTab(self._beta_page(), "Beta", G.DEV)
+
+        self.tabs.setCurrentIndex(self.overview_tab)
 
         self.hits = QListWidget(self, objectName="SearchHits")
-        self.hits.setFixedWidth(420)
         self.hits.hide()
         self.hits.itemClicked.connect(self._open_hit)
         self.search.installEventFilter(self)
         self._worker = None
         ScrollFields.install()
-        self._monitor_key = ""
-        self._monitor_numbers = MonitorNumbers()
         self._fill_monitors()
         self._fill_widgets()
+        self._refresh_nav_icons()
+        self._update_header(self.tabs.currentIndex())
         ctx.monitors.screens_changed.connect(self._fill_monitors)
 
     def mouse_step(self, step: int) -> None:
         self.tabs.setCurrentIndex((self.tabs.currentIndex() + step) % self.tabs.count())
 
     def page_fade(self) -> int:
-        return 140 if self.ctx.config.get("animations.enabled") else 0
+        return animation_duration(self.ctx.config.get("animations"), scale=0.55, max_reduced=0)
 
     def open_page(self, setup: bool = False) -> None:
         if setup:
@@ -284,6 +481,11 @@ class SettingsWindow(NativeWindow):
         self._fill_monitors()
         self._fill_widgets()
         self._refresh_setup()
+        for box, path in ((self.anim_enabled_check, "animations.enabled"),
+                          (self.anim_reduced_check, "animations.reduced")):
+            box.blockSignals(True)
+            box.setChecked(bool(self.ctx.config.get(path)))
+            box.blockSignals(False)
         self.apply_theme()
         self.showNormal() if self.isMinimized() else self.show()
         win_api.bring_to_front(int(self.winId()))
@@ -291,20 +493,80 @@ class SettingsWindow(NativeWindow):
         self.activateWindow()
 
     def open_named(self, label: str) -> None:
+        needle = label.strip().casefold()
+        target = PAGE_ALIASES.get(needle, label.strip())
+        candidates = {needle, target.casefold(), i18n.translate(target).casefold()}
         for index in range(self.tabs.count()):
-            if self.tabs.tabText(index) in (label, i18n.translate(label)):
+            tab_label = self.tabs.tabLabel(index)
+            names = {
+                self.tabs.tabText(index).casefold(),
+                tab_label.casefold(),
+                i18n.translate(tab_label).casefold(),
+            }
+            if candidates & names:
                 self.tabs.setCurrentIndex(index)
+                break
         self.open_page()
+
+    def _icon_colors(self) -> tuple[str, str]:
+        dark = self.ctx.theme.mode == "dark"
+        if self.ctx.theme.current == "aurora":
+            return ("#4EE2C0", "#B8C3D9") if dark else ("#0D9488", "#3A465E")
+        color = "#FFFFFF" if dark else "#202020"
+        return color, color
+
+    def _update_header(self, page_index: int) -> None:
+        if not 0 <= page_index < self.tabs.count():
+            return
+        active_color, _ = self._icon_colors()
+        glyph = self.tabs.tabGlyph(page_index)
+        self.page_icon.setPixmap(glyph_icon(glyph, 20, active_color).pixmap(20, 20) if glyph else QPixmap())
+        self.page_title.setText(self.tabs.tabLabel(page_index))
+        self.page_category.setText("· " + self.tabs.tabCategory(page_index))
+
+    def _refresh_nav_icons(self) -> None:
+        active_color, inactive_color = self._icon_colors()
+        current_row = self.tabs.nav.currentRow()
+        for row in range(self.tabs.nav.count()):
+            item = self.tabs.nav.item(row)
+            if item.data(SECTION_ROLE):
+                continue
+            glyph = item.data(GLYPH_ROLE)
+            if not glyph:
+                continue
+            color = active_color if row == current_row else inactive_color
+            item.setIcon(glyph_icon(glyph, 18, color))
 
     def apply_theme(self) -> None:
         super().apply_theme()
-        color = "#FFFFFF" if self.ctx.theme.mode == "dark" else "#202020"
-        for row in range(self.tabs.nav.count()):
-            item = self.tabs.nav.item(row)
-            if item.data(Qt.ItemDataRole.UserRole):  # Überschriften haben kein Symbol
-                item.setIcon(glyph_icon(item.data(Qt.ItemDataRole.UserRole), 18, color))
+        qss = self.styleSheet()
+        if "#SettingsHeader" not in qss:
+            self.setStyleSheet(qss + "\n" + _SETTINGS_FALLBACK_QSS)
+        for combo, value in ((self.theme_combo, self.ctx.theme.current),
+                             (self.mode_combo, self.ctx.theme.mode),
+                             (getattr(self, "theme_mode_combo", None), self.ctx.theme.mode)):
+            if combo is None:
+                continue
+            combo.blockSignals(True)
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+        self._update_theme_preview()
+        self._refresh_nav_icons()
+        self._update_header(self.tabs.currentIndex())
 
     # --- Suche in den Einstellungen ------------------------------------------------
+    def _place_hits(self) -> None:
+        self.hits.setFixedWidth(max(260, self.search.width()))
+        self.hits.setFixedHeight(min(self.hits.count(), 9) * 32 + 8)
+        self.hits.move(self.search.mapTo(self, QPoint(0, self.search.height() + 4)))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "hits") and self.hits.isVisible():
+            self._place_hits()
+
     def eventFilter(self, watched, event) -> bool:
         if watched is self.search and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
             self.search.clear()
@@ -315,8 +577,10 @@ class SettingsWindow(NativeWindow):
         needle = text.lower()
         found: list[tuple[str, int, QWidget | None]] = []
         dev = dev_menu_wanted(text)
-        if dev:  # nur im Dev-Build; geöffnet wird erst nach der PIN, wie über den Knopf im Setup
-            found.append(("Dev-Menü öffnen", DEV_HIT, None))
+        if dev:
+            menu_open = dev_label("menu_open")
+            if menu_open:
+                found.append((menu_open, DEV_HIT, None))
         for index in range(self.tabs.count()):
             page = self.tabs.widget(index)
             for widget in page.findChildren(QLabel) + page.findChildren(QCheckBox) + page.findChildren(QGroupBox):
@@ -340,9 +604,7 @@ class SettingsWindow(NativeWindow):
             self.hits.hide()
             return
         self.hits.setCurrentRow(0)
-        corner = self.search.mapTo(self, QPoint(0, self.search.height() + 4))
-        self.hits.setFixedHeight(min(self.hits.count(), 9) * 32 + 8)
-        self.hits.move(corner)
+        self._place_hits()
         self.hits.show()
         self.hits.raise_()
 
@@ -367,7 +629,7 @@ class SettingsWindow(NativeWindow):
         key = self.ctx.config.api_key()
         if not key or not prompt:
             self.search.clear()
-            self.search.setPlaceholderText("Für die KI braucht es einen API-Key (Setup)")
+            self.search.setPlaceholderText("Für die KI braucht es einen API-Key (Einrichtung)")
             return
         self.search.clear()
         self.search.setPlaceholderText("Denke nach …")
@@ -408,6 +670,27 @@ class SettingsWindow(NativeWindow):
         return self._resettable(combo, lambda: combo.setCurrentIndex(
             max(0, combo.findData(self.ctx.config.default_of(path)))))
 
+    def _language_combo(self) -> QWidget:
+        """„Systemsprache (automatisch)“ und jede Sprache aus assets/lang mit ihrem eigenen Namen."""
+        combo = QComboBox()
+        combo.addItem("Systemsprache (automatisch)", i18n.AUTO)
+        for code, name in i18n.languages().items():
+            combo.addItem(name, code)
+        current = self.ctx.config.get("language")
+        combo.setCurrentIndex(max(0, combo.findData(current if combo.findData(current) >= 0 else i18n.AUTO)))
+        state = {"value": combo.currentData()}
+
+        def changed(_index: int) -> None:
+            if combo.currentData() == state["value"]:
+                return
+            state["value"] = combo.currentData()
+            self.ctx.config.set("language", state["value"])
+            restart = getattr(self.ctx, "restart_ui", None)
+            if restart:
+                QTimer.singleShot(150, restart)  # sofort anwenden: Die Oberfläche baut sich in der neuen Sprache neu auf
+        combo.currentIndexChanged.connect(changed)
+        return self._resettable(combo, lambda: combo.setCurrentIndex(combo.findData(i18n.AUTO)))
+
     def _line(self, path: str) -> QWidget:
         line = QLineEdit(self.ctx.config.get(path))
         line.editingFinished.connect(lambda: self.ctx.config.set(path, line.text().strip()))
@@ -426,14 +709,77 @@ class SettingsWindow(NativeWindow):
         return self._resettable(slider, lambda: slider.setValue(round(self.ctx.config.default_of(path) * 100)))
 
     # --- Seiten -------------------------------------------------------------
+    def _update_theme_preview(self) -> None:
+        theme = self.ctx.theme.current
+        mode = self.ctx.theme.mode
+        palette = THEME_PALETTES.get(theme, THEME_PALETTES["aurora"]).get(
+            mode, THEME_PALETTES["aurora"]["dark"]
+        )
+        for swatch, color in zip(self._theme_swatches, palette):
+            swatch.setStyleSheet(f"#ThemeSwatch {{ background-color: {color}; }}")
+        self.theme_desc.setText(THEME_DESCRIPTIONS.get(theme, ""))
+
     def _design_page(self) -> Page:
         page = Page()
+        form = page.group("Erscheinungsbild")
+        self.theme_combo = QComboBox()
+        for value, label in self.ctx.theme.all_themes().items():  # Vorlagen und eigene Themes aus dem Editor
+            self.theme_combo.addItem(label, value)
+        self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(self.ctx.theme.current)))
+        self.theme_combo.currentIndexChanged.connect(
+            lambda _i: self.ctx.theme.set_theme(self.theme_combo.currentData()))
+        form.addRow("UI-Stil", self.theme_combo)
+
+        preview = QFrame(objectName="ThemePreview")
+        preview_layout = QVBoxLayout(preview)
+        preview_layout.setContentsMargins(12, 10, 12, 10)
+        preview_layout.setSpacing(8)
+        swatch_row = QHBoxLayout()
+        swatch_row.setContentsMargins(0, 0, 0, 0)
+        swatch_row.setSpacing(6)
+        self._theme_swatches: list[QFrame] = []
+        for _ in range(5):
+            swatch = QFrame(objectName="ThemeSwatch")
+            swatch.setFixedSize(18, 18)
+            swatch_row.addWidget(swatch)
+            self._theme_swatches.append(swatch)
+        swatch_row.addStretch(1)
+        preview_layout.addLayout(swatch_row)
+        self.theme_desc = QLabel(objectName="Muted")
+        self.theme_desc.setWordWrap(True)
+        preview_layout.addWidget(self.theme_desc)
+        form.addRow(preview)
+        self._update_theme_preview()
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Dunkel", "dark")
+        self.mode_combo.addItem("Hell", "light")
+        self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(self.ctx.theme.mode)))
+        self.mode_combo.currentIndexChanged.connect(
+            lambda _i: self.ctx.set_dark_mode(self.mode_combo.currentData()))
+        form.addRow("Modus (auch für Windows)", self.mode_combo)
+        files = QPushButton("Theme-Dateien öffnen", objectName="Secondary")
+        files.clicked.connect(lambda: win_api.shell_open(str(THEME_DIR)))
+        form.addRow("Eigene Anpassung", files)
+        page.note("Die .qss-Dateien sind reines CSS. Änderungen werden beim Speichern "
+                  "sofort übernommen, ohne Neustart.")
         form = page.group("Sprache und Region")
-        form.addRow("Sprache", self._combo("language", {i18n.AUTO: "Automatisch (wie Windows)", **i18n.LANGUAGES}))
-        page.note("Gilt nach dem Neustart von PopWin.")
+        form.addRow("Sprache", self._language_combo())
+        page.note("Die Oberfläche startet nach der Auswahl kurz neu, damit alles in der neuen Sprache erscheint. "
+                  "Fehlt ein Text in einer Sprache, erscheint er auf Englisch.")
         form = page.group("Animationen")
-        form.addRow(self._check("animations.enabled", "Weiche Animationen beim Starten, Öffnen und Schließen"))
+        self.anim_enabled_check = self._check("animations.enabled", "Weiche Animationen beim Starten, Öffnen und Schließen")
+        form.addRow(self.anim_enabled_check)
+        self.anim_reduced_check = self._check(
+            "animations.reduced", "Reduzierte Bewegung (dezente Überblendungen ohne Verschiebung)"
+        )
+        form.addRow(self.anim_reduced_check)
         form.addRow("Dauer", self._spin("animations.duration", 80, 600, " ms"))
+        form = page.group("Hell und Dunkel nach Uhrzeit")
+        form.addRow(self._check("auto_mode.enabled", "Tagsüber hell, abends dunkel"))
+        form.addRow("Hell ab", self._line("auto_mode.light_from"))
+        form.addRow("Dunkel ab", self._line("auto_mode.dark_from"))
+        page.note("Uhrzeiten wie 07:00 und 19:00. Stellst du zwischendurch von Hand um, bleibt das bis zum nächsten Wechsel.")
         return page
 
     def _themes_page(self) -> Page:
@@ -732,17 +1078,18 @@ class SettingsWindow(NativeWindow):
 
         self._dock_tools_group(layout, selected)
         if is_dev():
-
-
-            # --- [Antigravity Start: Sidebar Support (links/rechts)] ---
-            dev_form = self._option_group(layout, selected, "Dev · Claude-Knopf")
-            dev_check, _combo, _spin = self._monitor_controls(dev_form, selected.key)
-            dev_check("dev_claude_button", "Claude-Knopf neben dem Home-Knopf")
-            # --- [Antigravity Ende: Sidebar Support] ---
+            group_label = dev_label("dock_group")
+            beside_label = dev_label("dock_beside_home")
+            if group_label and beside_label:
+                dev_form = self._option_group(layout, selected, group_label)
+                dev_check, _combo, _spin = self._monitor_controls(dev_form, selected.key)
+                dev_check("dev_claude_button", beside_label)
 
         check, combo, spin = group("Elemente")
-        if is_dev():  # [Antigravity: Claude-Knopf umschaltbar wie andere Elemente]
-            check("dev_claude_button", "Claude-Knopf anzeigen")
+        if is_dev():
+            show_label = dev_label("dock_show")
+            if show_label:
+                check("dev_claude_button", show_label)
         check("show_start", "Home-Knopf anzeigen")
         combo("start_style", "Symbol des Home-Knopfs", {
             "home": "Haus", "windows": "Windows-Logo", "logo": "PopWin-Logo"})
@@ -907,6 +1254,11 @@ class SettingsWindow(NativeWindow):
         form = page.group("Animierter Hintergrund von PopWin", full=True)
         form.addRow(self._check("wallpaper.enabled", "Animierten Hintergrund abspielen"))
         form.addRow("Bildschirme", self._combo("wallpaper.screens", {"all": "Alle Bildschirme", "primary": "Nur dem Hauptmonitor"}))
+        form.addRow(self._check("wallpaper.pause_covered", "Pausieren, wenn Fenster den Desktop verdecken"))
+        form.addRow(self._check("wallpaper.pause_on_battery", "Im Akkubetrieb pausieren"))
+        form.addRow("Hintergrund wechseln", self._combo("wallpaper.rotate_minutes", {
+            0: "Nie", 5: "Alle 5 Minuten", 15: "Alle 15 Minuten", 30: "Alle 30 Minuten", 60: "Jede Stunde", 180: "Alle 3 Stunden"}))
+        form.addRow(self._check("wallpaper.rotate_shuffle", "In zufälliger Reihenfolge wechseln"))
         self.wall_list = QListWidget()
         self.wall_list.setFixedHeight(170)
         self.wall_list.itemClicked.connect(self._pick_wallpaper)
@@ -1048,6 +1400,10 @@ class SettingsWindow(NativeWindow):
                               "die du selbst einträgst. Der Speedtest spricht nur mit Cloudflare und nur, wenn du ihn startest "
                               "oder das stündliche Messen einschaltest. Fragst du im Explorer die KI, gehen Dateinamen aus dem offenen Ordner an Google."))
         form.addRow(page.text("Erweiterungen sind fremder Code und dürfen alles, was PopWin darf. Füge nur welche hinzu, denen du vertraust."))
+        form = page.group("Zwischenablage")
+        form.addRow(self._check("privacy.clipboard_history", "Verlauf der Zwischenablage merken (in der Suche mit „v “)"))
+        form.addRow(page.text("Die letzten 25 kopierten Texte bleiben nur im Arbeitsspeicher und sind nach dem Beenden von PopWin weg. "
+                              "Lass das aus, wenn du Passwörter kopierst."))
         form = page.group("Nova")
         form.addRow(self._check("nova.allow_memory", "Nova darf sich Dinge über dich merken"))
         form.addRow(self._check("nova.allow_screen", "Den Bildschirm ansehen"))
@@ -1086,15 +1442,10 @@ class SettingsWindow(NativeWindow):
         form.addRow(self._check("launcher.override_win_s", "Win + S übernehmen (ersetzt die Windows-Suche)"))
         form.addRow(self._check("network.hourly_test", "Jede Stunde automatisch einen Speedtest machen"))
         form.addRow(self._check("taskbar.magnify", "Taskbar-Icons wachsen unter der Maus (wie am Mac)"))
-        form.addRow(self._check("settings_v2", "Einstellungen mit Übersicht und Kategorien (aus: klassische Liste)"))
         tools = QPushButton("Symbolleiste über der Taskbar einstellen", objectName="Secondary")
         tools.setToolTip("Home, Suche, Nova und mehr schweben in einer eigenen Leiste über der Taskbar. Pro Monitor im Tab Taskbar.")
         tools.clicked.connect(lambda: self.open_named("Taskbar"))
         form.addRow(tools)
-        fast = QPushButton("Schnellstart einrichten", objectName="Secondary")
-        fast.setToolTip("Legt eine Windows-Aufgabe beim Anmelden an. Windows fragt dafür einmal nach Administratorrechten.")
-        fast.clicked.connect(lambda: win_api.run_elevated("schtasks", win_api.logon_task_arguments(*app_shortcut("main"))))
-        form.addRow(fast)
         form = page.group("PopWin-Apps statt Windows-Apps")
         for replacement in REPLACEMENTS:
             form.addRow(self._check(f"replacements.{replacement.key}", replacement.label))
@@ -1156,6 +1507,7 @@ class SettingsWindow(NativeWindow):
             "all": "Hauptmonitor-Apps überall, dazu die eigenen jedes Monitors",
             "primary": "Jeder Monitor zeigt nur seine eigenen Apps"}))
         form.addRow(self._check("taskbar.preview", "Vorschau beim Draufbleiben auf einem Task"))
+        form.addRow(self._check("taskbar.drag_switch", "Beim Ziehen über einem Task hinhalten wechselt zur App"))
         take_over = QPushButton("Apps der Windows-Taskleiste übernehmen", objectName="Secondary")
         take_over.clicked.connect(self.ctx.import_windows_pins)
         form.addRow(take_over)
@@ -1258,6 +1610,10 @@ class SettingsWindow(NativeWindow):
         form.addRow(self.hotkey_status)
         form.addRow(self._check("launcher.live_actions", "Aktionen schon beim Tippen vorschlagen"))
         form.addRow(self._check("launcher.situation_actions", "Vorschläge zur Situation beim Öffnen"))
+        form.addRow(self._check("launcher.quick_answers", "Rechnen, Umrechnen und „timer 10“ direkt in der Suche"))
+        form.addRow(self._check("launcher.file_search", "Dateien nach Namen finden (Desktop, Dokumente, Downloads, Bilder)"))
+        form.addRow("Im Web suchen mit „w …“", self._combo("launcher.web_search", {
+            "duckduckgo": "DuckDuckGo", "google": "Google", "bing": "Bing", "startpage": "Startpage"}))
         page.note(
             "Beispiele: <b>darkmode aktivieren</b>, <b>regedit</b>, <b>shell:startup</b>, "
             "<b>? Wie hoch ist der Eiffelturm</b>. Der KI-Teil läuft nur mit Enter, nie beim Tippen.")
@@ -1527,20 +1883,7 @@ class SettingsWindow(NativeWindow):
             if widget is not None:
                 widget.setVisible(on)
 
-    # --- Neues Einstellungsmenü (Beta) -------------------------------------------------
-    def new_look(self) -> bool:
-        return bool(self.ctx.config.get("settings_v2"))
-
-    def _apply_look(self) -> None:
-        """Neu: Übersicht als Startseite und Navigation nach Themen. Klassisch: die bekannte Liste ohne Übersicht."""
-        new = self.new_look()
-        self.tabs.arrange(new)
-        self.tabs.set_visible_tab(self.overview_tab, new)  # erst danach: Das Umsortieren vergisst, was versteckt war
-        self.tabs.nav.setFixedWidth(210 if new else 190)
-        if new or self.tabs.currentIndex() == self.overview_tab:
-            self.tabs.setCurrentIndex(self.overview_tab if new else self.overview_tab + 1)
-        self.apply_theme()
-
+    # --- Übersicht -------------------------------------------------------------------
     def _overview_page(self) -> Page:
         """Startseite des neuen Menüs: das Wichtigste zum Antippen, dazu Sprünge zu den großen Seiten."""
         page = Page()
@@ -1583,7 +1926,6 @@ class SettingsWindow(NativeWindow):
             button.clicked.connect(lambda _=False, name=label: self.open_named(name))
             jumps.addWidget(button, number // 3, number % 3)
         form.addRow(jumps)
-        page.note("Das ist das neue Einstellungsmenü (Beta). Zurück zum alten geht es unter Beta.")
         return page
 
     def _share_page(self) -> Page:
@@ -1616,9 +1958,39 @@ class SettingsWindow(NativeWindow):
         load.clicked.connect(self._import_settings)
         form.addRow(export)
         form.addRow(load)
+        form = page.group("Automatische Backups")
+        self.backup_list = QComboBox()
+        self._fill_backups()
+        restore = QPushButton("Backup zurückholen", objectName="Secondary")
+        restore.clicked.connect(self._restore_backup)
+        form.addRow("Stand vom", self.backup_list)
+        form.addRow(restore)
+        form.addRow(page.text("Bei jedem Start sichert PopWin die Einstellungen und behält die letzten fünf Stände. "
+                              "Ist die Einstellungsdatei einmal kaputt, nimmt PopWin von selbst den neuesten Stand."))
         page.note("Die Datei enthält nur das Aussehen und die Einstellungen von PopWin. Nicht dabei sind Schlüssel, "
                   "Nova-Verbindungen, Notizen und Widgets, dein Hintergrundbild und was nur zu deinen Bildschirmen passt.")
         return page
+
+    def _fill_backups(self) -> None:
+        self.backup_list.clear()
+        for file in config_manager.list_backups(self.ctx.config.path.parent / "backups"):
+            stamp = file.stem.removeprefix("settings-")  # JJJJMMTT-HHMMSS
+            label = f"{stamp[6:8]}.{stamp[4:6]}.{stamp[:4]}  {stamp[9:11]}:{stamp[11:13]}" if len(stamp) == 15 else stamp
+            self.backup_list.addItem(label, str(file))
+
+    def _restore_backup(self) -> None:
+        file = self.backup_list.currentData()
+        if not file:
+            QMessageBox.information(self, "PopWin", "Es gibt noch kein Backup. Das erste entsteht beim nächsten Start.")
+            return
+        if QMessageBox.question(self, "PopWin", "Diesen Stand zurückholen? Deine jetzigen Einstellungen werden dabei ersetzt.")                 != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            config_manager.restore_backup(self.ctx.config, Path(file))
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "PopWin", f"Konnte nicht übernommen werden: {exc}")
+            return
+        self.ctx.restart_ui()
 
     def _fill_presets(self) -> None:
         self.preset_list.clear()
@@ -1740,9 +2112,11 @@ class SettingsWindow(NativeWindow):
         form.addRow(search)
         form.addRow(self.update_state)
         if is_dev():
-            dev = QPushButton("Dev-Menü öffnen", objectName="Primary")
-            dev.clicked.connect(self._open_dev_menu)
-            form.addRow(dev)
+            menu_open = dev_label("menu_open")
+            if menu_open:
+                dev = QPushButton(menu_open, objectName="Primary")
+                dev.clicked.connect(self._open_dev_menu)
+                form.addRow(dev)
 
         form = page.group("4. Gemini API-Key (optional)")
         form.addRow(page.text(

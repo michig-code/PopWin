@@ -12,6 +12,7 @@ from core import win_api
 from core.monitor_manager import native_rect, screen_key
 from core.nova_controller import is_key_error
 from core.theme_manager import NOVA_CLASSICS
+from ui.animation import is_reduced
 from ui.base import G, IconButton, PopupPanel, set_prop
 from ui.notification_panel import EDGE_GAP, plain_label
 from ui.nova_artifacts_view import ArtifactsView, ConnectionForm, NovaNotice
@@ -140,10 +141,13 @@ class ApprovalCard(QWidget):
 
 
 class NovaPanel(PopupPanel):
+    ANIM_SCALE = 1.6
+    ANIM_MAX_REDUCED = 90
+    ANIM_MAX_DURATION = SLIDE_MS
+
     def __init__(self, ctx):
         # Nur der Inhalt rutscht, das Fenster steht schon am Ziel: Es würde sonst über den Nachbarmonitor ziehen.
         super().__init__(ctx, shift=self._slide)
-        self.animator.length = SLIDE_MS
         self.nova = ctx.nova
         self.reply: ChatText | None = None
         self.reply_text = ""
@@ -211,12 +215,16 @@ class NovaPanel(PopupPanel):
         self.nova.connection_wanted.connect(self._ask_connection)
         ctx.config.changed.connect(self._on_config)
 
+    def _orb_animated(self) -> bool:
+        settings = self.ctx.config.get("animations")
+        return bool(settings and settings.get("enabled", True) and not is_reduced(settings))
+
     def _header(self) -> QWidget:
         head = QWidget(objectName="NovaHead")
         head.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.head_box = header = QHBoxLayout(head)
         header.setContentsMargins(0, 0, 0, 0)
-        self.orb = NovaOrb()
+        self.orb = NovaOrb(animated=self._orb_animated())
         header.addWidget(self.orb)
         self.title = QLabel("Nova", objectName="PanelTitle")
         header.addWidget(self.title)
@@ -358,7 +366,12 @@ class NovaPanel(PopupPanel):
         return super().eventFilter(watched, event)
 
     def _on_config(self, section: str) -> None:
-        if section.startswith("nova") and self.isVisible():
+        if section.startswith("animations"):
+            animated = self._orb_animated()
+            self.orb.set_animated(animated)
+            if not animated:
+                self.spawn.stop()
+        elif section.startswith("nova") and self.isVisible():
             if section in PLACE_SETTINGS:
                 self._place()
             self.apply_theme()
@@ -396,6 +409,7 @@ class NovaPanel(PopupPanel):
         if not self._loaded or self._built_width != settings["width"] or self._built_look != self.look():
             self._rebuild()
         self.key_card.setVisible(not self.nova.api_key())
+        self.orb.set_animated(self._orb_animated())
         self.show()
         self.spawn.setGeometry(self.rect())
         self.spawn.raise_()
@@ -439,7 +453,7 @@ class NovaPanel(PopupPanel):
 
     def _arrive(self, distance: int) -> None:
         self.animator.enter(1.0, slide=distance)
-        if self.animator.duration():
+        if self.animator.duration() and not is_reduced(self.ctx.config.get("animations")):
             self.spawn.start()
 
     def _rebuild(self) -> None:

@@ -13,12 +13,14 @@ from pathlib import Path
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
 from core import theme_maker
+from core.dev import dev_qss
 
 log = logging.getLogger(__name__)
 
 THEME_DIR = Path(__file__).resolve().parent.parent / "themes"
 PRESETS = {
-    "liquid_glass": "Liquid Glass",
+    "aurora": "Aurora",
+    "liquid_glass": "Klassisch (Liquid Glass)",
     "pop_basic": "Pop!_OS Basic",
     "clean": "Clean",
     "minimalist": "Minimalistisch",
@@ -166,7 +168,7 @@ class ThemeManager(QObject):
 
     def _load(self, name: str) -> tuple[str, dict]:
         if not self.exists(name):
-            name = self.current if self.exists(self.current) else "liquid_glass"
+            name = self.current if self.exists(self.current) else "aurora"
         if name not in self._cache:
             if theme_maker.is_custom(name):
                 spec = theme_maker.load_spec(name) or theme_maker.DEFAULT_SPEC
@@ -195,7 +197,7 @@ class ThemeManager(QObject):
             qss = qss + TILES_OFF
         if wanted and self.tile_shape == "round":
             qss = qss + TILES_ROUND
-        return qss
+        return qss + dev_qss()  # nur mit dem privaten Dev-Teil und vorhandener dev.qss; sonst leer
 
     def _tiles_qss(self) -> str:
         if "_tiles" not in self._cache:

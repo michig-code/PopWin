@@ -311,6 +311,8 @@ class SystemStatus(QThread):
         self.performance = net_stats.PerformanceLog()
         self._process_load = ProcessLoad()
         self._net_last: tuple[float, int, int] | None = None
+        self._endpoint = None  # Lautsprecher-Lautstärke, nur von diesem Thread benutzt
+        self._endpoint_made = 0.0
         self.state: dict = {
             "net_down": 0.0, "net_up": 0.0, "disks": [], "processes": [], "ram_used": 0, "ram_total": 0,
             "cpu": 0.0, "ram": 0.0, "gpu": None, "mic": [], "net_kind": "none", "net_name": "",
@@ -352,6 +354,19 @@ class SystemStatus(QThread):
         gc.collect()  # COM-Zeiger müssen vor CoUninitialize weg, sonst stürzt das Beenden ab
         comtypes.CoUninitialize()
 
+    def _speaker_volume(self) -> tuple[int, bool] | None:
+        """Lautstärke jede Sekunde lesen, das COM-Gerät aber nur alle 10 s neu holen: das Neuholen kostet am meisten."""
+        try:
+            if self._endpoint is None or time.monotonic() - self._endpoint_made > 10:
+                from pycaw.pycaw import AudioUtilities
+                self._endpoint = AudioUtilities.GetSpeakers().EndpointVolume
+                self._endpoint_made = time.monotonic()
+            return round(self._endpoint.GetMasterVolumeLevelScalar() * 100), bool(self._endpoint.GetMute())
+        except Exception as exc:  # z. B. kein Ausgabegerät angeschlossen
+            self._endpoint = None
+            log.debug("Lautstärke nicht lesbar: %s", exc)
+            return None
+
     def _read_network_speed(self) -> None:
         counters = psutil.net_io_counters()
         now = time.monotonic()
@@ -376,7 +391,7 @@ class SystemStatus(QThread):
         s["gpu"] = reading if reading is not None else s["gpu"]
         s["mic"] = win_api.microphone_users()
         s["desktops"] = win_api.virtual_desktops()
-        volume = read_volume()
+        volume = self._speaker_volume()
         if volume:
             s["volume"], s["muted"] = volume
         while not self._actions.empty():

@@ -45,6 +45,7 @@ class WidthGrip(QWidget):
         self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.hide()
         self._start: tuple[QPoint, int, int] | None = None
+        self._moved = False
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -55,24 +56,24 @@ class WidthGrip(QWidget):
 
     # --- [Antigravity Start: Diagonaler Eckgriff vergrößert & verkleinert Breite und Höhe (Rest: Claude Code)] ---
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._start = (event.globalPosition().toPoint(), self.desklet.width(), self.desklet.height())
-            event.accept()
+        self._start = (event.globalPosition().toPoint(), self.desklet.width(), self.desklet.height())
+        self._moved = False
 
     def mouseMoveEvent(self, event) -> None:
         if self._start:
             start, width, height = self._start
             moved = event.globalPosition().toPoint() - start
-            self.desklet.preview_size(width + moved.x(), height + moved.y())
-            event.accept()
+            if not moved.isNull():
+                self._moved = True
+                self.desklet.preview_size(width + moved.x(), height + moved.y())
 
     def mouseReleaseEvent(self, event) -> None:
         if self._start:
+            moved = self._moved
             self._start = None
-            w, h = self.desklet.width(), self.desklet.height()
-            self.desklet.set_options({"width": w, "height": h})
-            event.accept()
-    # --- [Antigravity Ende: Diagonaler Eckgriff vergrößert & verkleinert Breite und Höhe] ---
+            self._moved = False
+            if moved:
+                self.desklet.set_options(width=self.desklet.width(), height=self.desklet.height())
 
 
 class DeskletWindow(ThemedWindow):
@@ -80,6 +81,7 @@ class DeskletWindow(ThemedWindow):
     GLYPH = G.APP
     DESCRIPTION = ""
     DEFAULT_WIDTH = 240
+    DEFAULT_HEIGHT = 0
     OPTIONS: tuple[Option, ...] = ()
 
     def __init__(self, ctx, spec: dict):
@@ -120,7 +122,11 @@ class DeskletWindow(ThemedWindow):
         return (*common, *self.OPTIONS)
 
     def default_of(self, option: Option):
-        return self.DEFAULT_WIDTH if option.key == "width" else option.default
+        if option.key == "width":
+            return self.DEFAULT_WIDTH
+        if option.key == "height":
+            return self.DEFAULT_HEIGHT
+        return option.default
 
     def option(self, key: str):
         chosen = self.spec.get("options", {})
@@ -128,16 +134,14 @@ class DeskletWindow(ThemedWindow):
             return chosen[key]
         return next(self.default_of(o) for o in self.all_options() if o.key == key)
 
-    # --- [Antigravity Start: Atomares Setzen mehrerer Optionen (Rest: Claude Code)] ---
-    def set_options(self, updates: dict) -> None:
+    def set_option(self, key: str, value) -> None:
+        self.set_options(**{key: value})
+
+    def set_options(self, **updates) -> None:
         options = {**self.spec.get("options", {}), **updates}
         self.spec["options"] = options
         self.ctx.widgets.update_spec(self.spec["id"], options=options)
         self.apply_options()
-
-    def set_option(self, key: str, value) -> None:
-        self.set_options({key: value})
-    # --- [Antigravity Ende: Atomares Setzen mehrerer Optionen] ---
 
     def accent(self) -> QColor:
         chosen = self.option("accent")
@@ -146,12 +150,14 @@ class DeskletWindow(ThemedWindow):
         return QColor(self.ctx.theme.meta()["ind_light" if self.ctx.theme.mode == "light" else "ind"])
 
     def apply_options(self) -> None:
-        self.setFixedWidth(self.option("width"))
-        self._fit_height(self.option("height"))
         if self.title_label:
             self.title_label.setVisible(self.option("show_title"))
         self.options_changed()
-        self.adjustSize()
+        self.setFixedWidth(self.option("width"))
+        height = self.option("height")
+        self._fit_height(height)
+        if not height:
+            self.adjustSize()
         self.update()
 
     def options_changed(self) -> None:

@@ -1,7 +1,7 @@
 """PopWin - Entry-Point, App-Initialisierung und Safe-Exit."""
 from __future__ import annotations
 
-from core.dev import is_dev  # [Antigravity]
+from core.dev import open_dev_window  # [Antigravity]
 
 import atexit
 import ctypes
@@ -24,24 +24,28 @@ if __name__ == "__main__":
         sys.argv = sys.argv[:1] + _arguments
         _module = {"explorer": "explorer.app", "editor": "editor.app", "terminal": "terminal.app",
                    "studio": "studio.app", "wallpaper": "wallpaper.app", "cleanup": "core.cleanup", "stream": "stream.app", "watchdog": "core.taskbar_watchdog",
-                   "nova_tool": "core.nova_tool_runner"}[_app]
+                   "nova_tool": "core.nova_tool_runner", "tts_for_windows": "tts.app"}[_app]  # [Antigravity]
         sys.exit(importlib.import_module(_module).main())
 
 # Muss vor Qt im Hauptthread geladen werden: comtypes meldet COM beim Beenden im Hauptthread ab.
 # Beim ersten Import in einem Hintergrund-Thread entzieht das Qt die COM-Initialisierung -> Absturz.
 import comtypes  # noqa: E402,F401
+import shiboken6  # noqa: E402
 from PySide6.QtCore import QObject, QTimer  # noqa: E402
 from PySide6.QtGui import QCursor, QFont, QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from config.config_manager import ConfigManager  # noqa: E402
+from config.config_manager import DEFAULT_DEBOUNCE_MS, ConfigManager  # noqa: E402
 from core import hardware, i18n, net_stats, paths, wallpapers, win_api, windows_pins  # noqa: E402
+from core.quick_answers import ClipHistory, FileIndex  # noqa: E402
+from core.schedule import mode_for, parse_clock  # noqa: E402
+from config import config_manager  # noqa: E402
 from core.version import VERSION  # noqa: E402
 from core.paths import LOG_DIR, app_command, app_shortcut  # noqa: E402
 from core.app_index import AppIndex  # noqa: E402
 from core.media_controller import MediaController  # noqa: E402
-from core.process_trim import ProcessTrimmer
-from core.monitor_manager import MonitorManager, screen_key  # noqa: E402
+from core.process_trim import ProcessTrimmer  # noqa: E402
+from core.monitor_manager import MonitorManager, native_rect, screen_key  # noqa: E402
 from core.nova_controller import NovaController  # noqa: E402
 from ui.nova_panel import NovaPanel  # noqa: E402
 from core.quick_settings import FocusTimer  # noqa: E402
@@ -72,7 +76,11 @@ log = logging.getLogger("popwin")
 PID_FILE = LOG_DIR / "popwin.pid"
 _MUTEX_NAME = "PopWin.SingleInstance"
 SESSION_RETRY_MS = 30000
+WINDOW_CHANGE_DELAY_MS = 60  # Taskbar nach einem geschlossenen oder neuen Fenster sofort nachziehen
 UPDATE_DELAY_MS = 20000  # erst wenn alles steht; die Suche fragt GitHub
+TASKBAR_GUARD_FAST_MS = 250
+TASKBAR_GUARD_SLOW_MS = 500  # länger lag die Windows-Taskleiste spürbar über dem Dock und fing Klicks ab
+TASKBAR_GUARD_CALM_TICKS = 4
 ERROR_ALREADY_EXISTS = 183
 
 
@@ -81,7 +89,7 @@ class PopWinApp(QObject):
 
     def __init__(self, config: ConfigManager | None = None):
         super().__init__()
-        self.config = config or ConfigManager()
+        self.config = config or ConfigManager(debounce_ms=DEFAULT_DEBOUNCE_MS)
         i18n.install(QApplication.instance(), self.config.get("language"))
         self.theme = ThemeManager(self.config)
         self.monitors = MonitorManager()
@@ -102,11 +110,16 @@ class PopWinApp(QObject):
         self._taskbar_hidden = False
         self._windows_cache: list[win_api.WindowInfo] = []
         self._windows_time = 0.0
+        self._fullscreen_cache: dict[tuple, tuple[float, bool]] = {}
 
         self.config.set("mode", win_api.system_mode(), notify=False)
         self.media.updated.connect(self._remember_media)
         self.status.updated.connect(self._follow_system_mode)
 
+        # Dateisuche und Zwischenablage-Verlauf der Suche; beide bleiben leer, solange ihre Einstellung aus ist.
+        self.files = FileIndex([str(Path.home() / name) for name in ("Desktop", "Documents", "Downloads", "Pictures")])
+        self.clips = ClipHistory()
+        QGuiApplication.clipboard().dataChanged.connect(self._remember_clip)
         self.task_preview = TaskPreview(self)
         self.tasks = TaskController(self)
         self.nova = NovaController(self)
@@ -127,10 +140,21 @@ class PopWinApp(QObject):
 
         self._hook_timer = QTimer(self, singleShot=True, interval=300)
         self._hook_timer.timeout.connect(self._restart_hooks)
-        self._taskbar_guard = QTimer(self, interval=500)
+        self._taskbar_guard_calm = 0
+        self._taskbar_guard = QTimer(self, interval=TASKBAR_GUARD_FAST_MS)
         self._taskbar_guard.timeout.connect(self._keep_taskbar_hidden)
+        self._bar_sync_timer = QTimer(self, interval=1000)
+        self._bar_sync_timer.timeout.connect(self._sync_bars)
+        # Geht ein Programm zu, meldet Windows das sofort; kurz gesammelt, weil oft mehrere Fenster auf einmal gehen.
+        self._window_change_timer = QTimer(self, singleShot=True, interval=WINDOW_CHANGE_DELAY_MS)
+        self._window_change_timer.timeout.connect(self._windows_changed)
+        self._window_hook = 0
 
         self.wallpaper = wallpapers.WallpaperPlayer(self)
+        self._scheduled_mode = ""  # was die Uhr zuletzt verlangt hat; nur ein Wechsel davon schaltet um
+        self._mode_timer = QTimer(self, interval=60_000)
+        self._mode_timer.timeout.connect(self._follow_clock)
+        self.config.changed.connect(lambda key: key.startswith("auto_mode") and self._sync_mode_clock())
         self.trimmer = ProcessTrimmer(self.config, self)
         self.config.changed.connect(self._on_config)
         self.config.changed.connect(lambda key: key == "desktop_groups.style" and self.desktop_groups.sync())
@@ -148,6 +172,8 @@ class PopWinApp(QObject):
             win_api.move_autostart_link(*app_shortcut("main"))
         except Exception as exc:  # die Oberfläche darf daran nie scheitern
             log.warning("Startmenü-Eintrag nicht anlegbar: %s", exc)
+        config_manager.backup_settings(self.config.path)  # ein Stand pro Start, die letzten fünf bleiben
+        self._sync_mode_clock()
         self.status.start()
         self.media.start()
         self.apps.start()
@@ -161,7 +187,17 @@ class PopWinApp(QObject):
         self._apply_native_taskbar()
         if leftover and not self._taskbar_hidden:
             self._restore_native_taskbar()
+        if not self._taskbar_hidden:  # keine eigene Taskbar: Die Zweitleisten von Windows sollen gleich wiederkommen
+            win_api.restore_secondary_taskbars(notify=True)
         self.rebuild_bars()
+        self._bar_sync_timer.start()
+        self._window_hook = win_api.watch_window_changes(self._on_window_change,
+                                                         lambda: {w.hwnd for w in self._windows_cache})
+        for bar in self.bars:
+            if hasattr(bar, "_fullscreen_timer"):
+                bar._fullscreen_timer.stop()
+            if isinstance(bar, Dock):
+                bar.timer.stop()
         self.widgets.start()
         self.trimmer.sync()
         self.desktop_groups.sync()
@@ -256,22 +292,62 @@ class PopWinApp(QObject):
         for bar in added:
             bar.reveal()
 
+    def _on_screens_changed(self) -> None:
+        win_api.invalidate_monitor_cache()
+        self.rebuild_bars(recreate=True)
+        self._apply_native_taskbar()
+
+    def _sync_bars(self) -> None:
+        if not self.bars or self._exiting or self._closed:
+            return
+        live = [(bar, native_rect(bar.bar_screen)) for bar in list(self.bars)
+                if shiboken6.isValid(bar) and getattr(bar, "_registered", False)]
+        if not live:
+            return
+        monitors = list(dict.fromkeys(monitor for _bar, monitor in live))
+        fullscreen_map = win_api.fullscreen_monitors(monitors)
+        has_dock = False
+        for bar, monitor in live:
+            bar.apply_fullscreen_state(fullscreen_map.get(monitor, False))
+            if isinstance(bar, Dock):
+                has_dock = True
+        if has_dock:
+            self.windows()
+            for bar, _monitor in live:
+                if isinstance(bar, Dock):
+                    bar.refresh()
+
+    def _on_window_change(self) -> None:
+        if not self._closed and not self._window_change_timer.isActive():
+            self._window_change_timer.start()
+
+    def _windows_changed(self) -> None:
+        self._windows_time = 0.0  # Zwischenspeicher verwerfen, sonst zeigte die Taskbar das Fenster noch bis zu 1 s
+        self._sync_bars()
+
     def windows(self) -> list[win_api.WindowInfo]:
         """Kurz zwischengespeichert: Jedes Dock fragt das sonst pro Monitor einzeln ab."""
         now = time.monotonic()
-        if now - self._windows_time > 0.3:
+        if now - self._windows_time > 0.9:
             self._windows_cache = win_api.list_windows() + self._own_windows()
             self._windows_time = now
         return self._windows_cache
+
+    def fullscreen_on(self, monitor: tuple[int, int, int, int]) -> bool:
+        """Kurz zwischengespeichert: Topbar und Taskbar eines Monitors prüfen sonst beide alle 0,7 s jedes Fenster."""
+        now = time.monotonic()
+        cached = self._fullscreen_cache.get(monitor)
+        if cached is None or now - cached[0] > 0.25:
+            cached = self._fullscreen_cache[monitor] = (now, win_api.fullscreen_on(monitor))
+        return cached[1]
 
     def _own_windows(self) -> list[win_api.WindowInfo]:
         """list_windows lässt PopWin aus, die Einstellungen sollen aber wie eine App in der Taskbar stehen."""
         windows = [("settings", self.settings), ("widgets", self.widgets.gallery)]
         # --- [Antigravity Start] Dev-Menü auf der Taskbar anzeigen ---
-        if is_dev():
-            dev_menu = getattr(sys.modules.get("devtools.menu"), "_menu", None)
-            if dev_menu is not None:
-                windows.append(("dev", dev_menu))
+        dev_menu = open_dev_window()  # None ohne den privaten Dev-Teil
+        if dev_menu is not None:
+            windows.append(("dev", dev_menu))
         # --- [Antigravity Ende] ---
         return [win_api.WindowInfo(int(window.winId()), window.windowTitle(), sys.executable, os.getpid(), popwin_app=app)
                 for app, window in windows if window is not None and window.isVisible()]
@@ -313,7 +389,7 @@ class PopWinApp(QObject):
         if win_api.foreground_is_fullscreen():
             self._screens_timer.start()
             return
-        self.rebuild_bars(recreate=True)
+        self._on_screens_changed()  # Monitor-Cache leeren, Leisten neu, Windows-Taskleiste abgleichen
 
     # --- Aktionen für die Module -----------------------------------------------
     def show_launcher(self) -> None:
@@ -395,6 +471,33 @@ class PopWinApp(QObject):
         win_api.set_system_mode(mode)
         self.theme.set_mode(mode)
 
+    def _sync_mode_clock(self) -> None:
+        if self.config.get("auto_mode.enabled"):
+            self._scheduled_mode = ""  # neue Zeiten gelten sofort
+            self._mode_timer.start()
+            self._follow_clock()
+        else:
+            self._mode_timer.stop()
+
+    def _follow_clock(self) -> None:
+        """Hell und Dunkel nach Uhrzeit. Geschaltet wird nur, wenn die Uhr die Seite wechselt: Wer zwischendurch
+        von Hand umstellt, behält das bis zum nächsten Wechsel."""
+        settings = self.config.get("auto_mode")
+        now = time.localtime()
+        mode = mode_for(now.tm_hour * 60 + now.tm_min, parse_clock(settings["light_from"], 7 * 60),
+                        parse_clock(settings["dark_from"], 19 * 60))
+        if mode != self._scheduled_mode:
+            self._scheduled_mode = mode
+            if mode != self.theme.mode:
+                self.set_dark_mode(mode)
+
+    def _remember_clip(self) -> None:
+        """Nur Text, nur im Arbeitsspeicher, und nur, wenn der Verlauf unter Datenschutz eingeschaltet ist."""
+        if self.config.get("privacy.clipboard_history"):
+            self.clips.add(QGuiApplication.clipboard().text())
+        elif self.clips.items:
+            self.clips.clear()
+
     def _remember_media(self, media) -> None:
         self.last_media = media
 
@@ -422,8 +525,13 @@ class PopWinApp(QObject):
             # Steht schon einer da, kommt PopWin aus einem Neustart: Die Leiste ist noch versteckt, der alte Wert ist der echte.
             if self.config.get("shell.saved_taskbar_state") is None:
                 self.config.set("shell.saved_taskbar_state", win_api.taskbar_state(), notify=False)
+            self.config.flush()
             self._start_watchdog()
             win_api.hide_native_taskbar()
+            # Nach dem Anmelden: Die Zweitleisten wurden gar nicht erst gebaut, der echte Wert kommt still zurück.
+            win_api.restore_secondary_taskbars(notify=False)
+            self._taskbar_guard_calm = 0
+            self._taskbar_guard.setInterval(TASKBAR_GUARD_FAST_MS)
             self._taskbar_guard.start()
         else:
             self._restore_native_taskbar()
@@ -432,6 +540,7 @@ class PopWinApp(QObject):
         self._taskbar_guard.stop()
         win_api.show_native_taskbar(self.config.get("shell.saved_taskbar_state"))
         self.config.set("shell.saved_taskbar_state", None, notify=False)
+        self.config.flush()
 
     def session_ending(self) -> None:
         """Beim Herunterfahren beendet Windows PopWin, bevor es aufräumen kann. Auto-Hide speichert Windows aber dauerhaft,
@@ -440,11 +549,25 @@ class PopWinApp(QObject):
         if self._taskbar_hidden:
             self._taskbar_hidden = False
             self._restore_native_taskbar()
+            if win_api.autostart_enabled():  # beim nächsten Anmelden blitzen sonst die Zweitleisten kurz auf
+                win_api.suppress_secondary_taskbars()
             QTimer.singleShot(SESSION_RETRY_MS, self._apply_native_taskbar)
+        self.config.flush()
 
     def _keep_taskbar_hidden(self) -> None:
         # Der Explorer blendet sie nach einem Neustart oder Monitorwechsel wieder ein.
-        win_api.reinforce_taskbar_hidden()
+        if win_api.tray_overflow_window():
+            return
+        if win_api.reinforce_taskbar_hidden():
+            self._taskbar_guard_calm = 0
+            self._taskbar_guard.setInterval(TASKBAR_GUARD_FAST_MS)
+            for bar in self.bars:
+                if shiboken6.isValid(bar) and bar.isVisible() and not bar._fullscreen:
+                    bar.ensure_on_top()
+        else:
+            self._taskbar_guard_calm += 1
+            if self._taskbar_guard_calm >= TASKBAR_GUARD_CALM_TICKS and self._taskbar_guard.interval() != TASKBAR_GUARD_SLOW_MS:
+                self._taskbar_guard.setInterval(TASKBAR_GUARD_SLOW_MS)
 
     def _start_watchdog(self) -> None:
         if self._watchdog is None or self._watchdog.poll() is not None:
@@ -460,7 +583,7 @@ class PopWinApp(QObject):
         self._exiting = True
         for window in [*self.bars, *self.widgets.windows.values()]:
             window.animator.leave()
-        delay = animation_duration(self.config.get("animations"), self.config.get("performance.level", "balanced")) + 40
+        delay = animation_duration(self.config.get("animations"), level=self.config.get("performance.level", "balanced")) + 40
         QTimer.singleShot(delay, self._finish_exit)
 
     def _offer_update(self, release: dict) -> None:
@@ -490,6 +613,8 @@ class PopWinApp(QObject):
         if self._closed:
             return
         self._closed = True
+        self._bar_sync_timer.stop()
+        self._window_change_timer.stop()
         # Zuerst die Taskleiste: Sie muss zurückkommen, selbst wenn danach etwas schiefgeht.
         # Beim Neustart nicht: Sie nähme kurz Platz und schöbe ein laufendes Spiel (Valorant) nach oben.
         # Das neue PopWin versteckt sie gleich wieder; kommt es nicht, stellt der Wächter sie zurück.
@@ -507,6 +632,7 @@ class PopWinApp(QObject):
         self.media.stop()
         self.notifications.stop()
         self.apps.wait(1000)
+        self.config.flush()
 
 
 def _setup_logging() -> None:
@@ -543,6 +669,7 @@ def main() -> int:
         return 0
 
     if win_api.AUTOSTART_FLAG in sys.argv:
+        log.info("Autostart: PopWin lädt")  # mit dem Zeitstempel unten sieht man, wie lange der Start dauert
         win_api.wait_for_shell()
     PID_FILE.write_text(str(win_api.kernel32.GetCurrentProcessId()), encoding="ascii")
     app = create_application(sys.argv)
@@ -551,6 +678,7 @@ def main() -> int:
     app.commitDataRequest.connect(lambda _manager: popwin.session_ending())
     atexit.register(popwin.shutdown)
     popwin.start()
+    log.info("PopWin steht")
     code = app.exec()
     PID_FILE.unlink(missing_ok=True)
     ctypes.windll.kernel32.CloseHandle(mutex)

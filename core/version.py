@@ -1,3 +1,3 @@
-"""Version dieser Ausgabe und woher Updates kommen. Das Dev-Menü erhöht VERSION und setzt REPO beim Veröffentlichen."""
-VERSION = "4.0.1"
+"""Version dieser Ausgabe und Quelle für Updates."""
+VERSION = "4.5.0"
 REPO = "michig-code/popwin"  # "Besitzer/Name" des öffentlichen GitHub-Repositorys; leer heißt: keine Update-Suche

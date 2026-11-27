@@ -15,7 +15,8 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets" / "apps"
 EXPLORER_LINKS = ("file explorer", "datei-explorer", "explorer")
 POPWIN_NAMES = {"explorer": "PopWin Explorer", "settings": "PopWin Einstellungen", "nova": "Nova",
                 "editor": "PopWin Editor", "terminal": "PopWin Terminal", "studio": "PowerShell Studio", "widgets": "PopWin Widgets",
-                "stream": "PopWin Stream", "dev": "PopWin Dev"}  # [Antigravity]
+                "stream": "PopWin Stream", "tts_for_windows": "TexttoSpeech for Windows"}  # [Antigravity]
+INTERNAL_LAUNCHERS: dict[str, Callable[[object], None]] = {}
 TERMINALS = ("cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe", "windowsterminal.exe")
 
 
@@ -83,7 +84,10 @@ def taskbar_slot(ctx, app: str) -> tuple[str, dict]:
         if replacement.key == app and ctx.config.get(f"replacements.{app}"):
             return replacement.exe, {"target": replacement.exe, "name": POPWIN_NAMES[app].removeprefix("PopWin "),
                                      "windows": []}
-    return f"popwin:{app}", {"target": "", "name": POPWIN_NAMES[app], "icon": app_icon(app), "windows": []}  # [Antigravity]
+    # --- [Antigravity Start] Fallback für PopWin-Apps ohne eigene .ico-Datei (z. B. tts_for_windows -> Fenster-Icon) ---
+    icon = app_icon(app)
+    return f"popwin:{app}", {"target": "", "name": POPWIN_NAMES.get(app, app), "icon": icon if os.path.exists(icon) else "", "windows": []}
+    # --- [Antigravity Ende] ---
 
 
 def launch(ctx, target: str) -> bool:
@@ -91,15 +95,28 @@ def launch(ctx, target: str) -> bool:
     if hasattr(ctx, "config") and hasattr(ctx.config, "record_app_launch") and target:  # [Antigravity]
         ctx.config.record_app_launch("", target)
     # --- [Antigravity Start] Interne PopWin-Apps starten ---
-    if target == "popwin:dev":
-        from core.dev import open_dev_menu
-        open_dev_menu(ctx)
+    if target in INTERNAL_LAUNCHERS:
+        INTERNAL_LAUNCHERS[target](ctx)
         return True
     if target == "popwin:settings":
         ctx.open_settings()
         return True
     if target == "popwin:widgets":
-        ctx.open_widgets()
+        ctx.widgets.open_gallery()  # PopWinApp hat kein open_widgets
+        return True
+    if target == "popwin:tts_for_windows":
+        ext = getattr(getattr(ctx, "extensions", None), "items", {}).get("tts_for_windows")
+        if ext is not None:
+            ext.start()
+        else:
+            ctx.open_app("tts_for_windows")
+        return True
+    if target == "popwin:tts_for_windows":
+        ext = getattr(getattr(ctx, "extensions", None), "items", {}).get("tts_for_windows")
+        if ext is not None:
+            ext.start()
+        else:
+            ctx.open_app("tts_for_windows")
         return True
     # --- [Antigravity Ende] ---
     for replacement in REPLACEMENTS:

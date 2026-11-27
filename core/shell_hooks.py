@@ -23,8 +23,9 @@ HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.L
 
 WH_KEYBOARD_LL, WH_MOUSE_LL = 13, 14
 WM_QUIT, WM_HOTKEY = 0x0012, 0x0312
+WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0100, 0x0101, 0x0104, 0x0105
+LLKHF_INJECTED = 0x00000010
 WM_PAUSE_MOUSE = 0x8000 + 0x51  # WM_APP: wParam 1 = Maus-Hook ab, 0 = wieder an
-WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
 WM_RBUTTONDOWN, WM_RBUTTONUP = 0x0204, 0x0205
 VK_S, VK_LWIN, VK_RWIN, VK_DUMMY = 0x53, 0x5B, 0x5C, 0xE8
 VK_SHIFT, VK_CONTROL, VK_ALT = 0x10, 0x11, 0x12
@@ -236,6 +237,8 @@ class ShellHooks(QThread):
     def _on_key(self, code: int, wparam: int, lparam: int) -> int:
         if code == 0:
             info = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            if (info.flags & LLKHF_INJECTED) and info.dwExtraInfo == win_api.POPWIN_SYNTH_EXTRA_INFO:
+                return user32.CallNextHookEx(None, code, wparam, lparam)
             key = info.vkCode
             if wparam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 if key in (VK_LWIN, VK_RWIN):
@@ -253,7 +256,7 @@ class ShellHooks(QThread):
                         win_api.send_keys(VK_DUMMY)
                         self.launcher_requested.emit()
                         return 1
-            elif key in (VK_LWIN, VK_RWIN) and self._win_down:
+            elif wparam in (WM_KEYUP, WM_SYSKEYUP) and key in (VK_LWIN, VK_RWIN) and self._win_down:
                 self._win_down = False
                 if self._win_alone and self.remap_win_key:
                     win_api.send_keys(VK_DUMMY)

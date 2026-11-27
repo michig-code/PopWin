@@ -6,10 +6,11 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 
 from core.paths import DATA_DIR
 
@@ -18,8 +19,20 @@ log = logging.getLogger(__name__)
 SETTINGS_PATH = DATA_DIR / "settings.json"
 KEYRING_SERVICE = "PopWin"
 KEYRING_USER = "gemini_api_key"
+DEFAULT_DEBOUNCE_MS = 300
 
-THEMES = ("liquid_glass", "pop_basic", "clean", "minimalist", "tiles_graphite", "tiles_obsidian", "tiles_frost",
+
+def session_path_for(path: Path) -> Path:
+    """Ausweichdatei, solange settings.json beim Start gesperrt war."""
+    return path.with_name(f"{path.stem}.session.json")
+
+SAVE_BACKOFF_S = (0.03, 0.06, 0.12, 0.2, 0.3, 0.4)
+LOAD_BACKOFF_S = (0.04, 0.08, 0.15, 0.25)
+RETRY_SAVE_DELAY_MS = 1000
+RETRY_SAVE_MAX_DELAY_MS = 30000
+MAX_DEFERRED_RETRIES = 5  # danach mit dem längsten Abstand weiter versuchen, bis es klappt
+
+THEMES = ("aurora", "liquid_glass", "pop_basic", "clean", "minimalist", "tiles_graphite", "tiles_obsidian", "tiles_frost",
           "glass_clear", "glass_smoke", "neon_night")
 CUSTOM_THEME_PREFIX = "custom_"  # eigene Themes aus dem Theme-Editor (core/theme_maker.py)
 # Ausgemusterte Stile -> der ähnlichste, der geblieben ist
@@ -43,22 +56,25 @@ _TERMINAL = "shell:AppsFolder\\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
 
 DEFAULTS: dict[str, Any] = {
     "first_run": True,
-    "settings_v2": True,  # Einstellungen mit Übersicht und Kategorien; aus = klassische Liste
-    "settings_v2_since_4": True,  # Merker: Wer von 3.x kommt, bekommt das neue Menü einmal eingeschaltet
-    "language": "auto",
+    "language": "system",  # "system" = Windows-Anzeigesprache, sonst ein Code aus assets/lang
     "hide_missing_hardware": True,
     "network": {"hourly_test": False},
-    "wallpaper": {"enabled": False, "file": "", "screens": "all", "source": "auto"},
-    "privacy": {"online_check": True},
+    # pause_covered: ruht, solange Fenster den Desktop verdecken; pause_on_battery: ruht ohne Netzteil
+    # rotate_minutes: alle so viele Minuten der nächste Hintergrund, 0 = immer derselbe
+    "wallpaper": {"enabled": False, "file": "", "screens": "all", "source": "auto", "pause_covered": True,
+                  "pause_on_battery": True, "rotate_minutes": 0, "rotate_shuffle": False},
+    # Hell und Dunkel nach Uhrzeit; ab Werk aus, dann gilt die Einstellung von Windows
+    "auto_mode": {"enabled": False, "light_from": "07:00", "dark_from": "19:00"},
+    "privacy": {"online_check": True, "clipboard_history": False},  # Verlauf: nur im RAM, ab Werk aus
     "keep_icons_off_widgets": False,
     "popwin_file_dialog": False,
     "desktop_groups": {"style": "off", "layout": {"order": [], "groups": {}}},
-    "animations": {"enabled": True, "duration": 220},
+    "animations": {"enabled": True, "duration": 220, "reduced": False},
     # saver: keine Animationen, seltener nachsehen; balanced: wie bisher; beautiful: alle Effekte
     # game_mode: Leisten ruhen hinter Vollbild-Spielen
     "performance": {"level": "balanced", "game_mode": True},
     "windows_trim": {},  # Windows entlasten: Kennung aus core.process_trim -> an/aus
-    "theme": "pop_basic",
+    "theme": "aurora",
     "mode": "dark",
     "icon_tiles": "theme",  # Kacheln um die Taskbar-Icons: theme = wie im UI-Stil, on, off
     "tile_shape": "theme",  # Form der Kacheln: theme = wie im UI-Stil, round = komplett rund
@@ -69,7 +85,29 @@ DEFAULTS: dict[str, Any] = {
         "topbar": {"mode": "all", "screens": []},
         "taskbar": {"mode": "all", "screens": []},
     },
-    "extensions": {"enabled": {}, "discord": {"monitors": [], "layout": "windows", "size": 1080, "fps": 15}},
+    "extensions": {
+        "enabled": {},
+        "discord": {"monitors": [], "layout": "windows", "size": 1080, "fps": 15},
+        # --- [Antigravity Start] TexttoSpeech for Windows Standardwerte ---
+        "tts_for_windows": {
+            "voice": "auto",
+            "robot_style": "cyber",
+            "rate": 0,
+            "ui_theme": "cyber",
+            "hotkey": "alt+y",
+            "scream_auto": True,
+            "scream_boost": 280,
+            "virtual_volume": 100,
+            "headphone_volume": 85,
+            "headphone_device": "default",
+            "virtual_device": "auto",
+            "input_device": "auto",
+            "mic_passthrough": False,
+            "respect_fullscreen": False,
+            "window_pos": [],
+        },
+        # --- [Antigravity Ende] ---
+    },
     # Beta: Die PopWin-Apps ersetzen ihre Windows-Gegenstücke erst, wenn man sie einzeln einschaltet.
     "replacements": {"explorer": False, "editor": False, "terminal": False, "studio": False},
     "notifications": {"side": "right", "width": 380, "group": True, "show_count": True, "hidden": []},
@@ -81,6 +119,7 @@ DEFAULTS: dict[str, Any] = {
         "screen_pins": {},
         "order": {},
         "preview": True,
+        "drag_switch": True,  # beim Ziehen über einem Task hinhalten wechselt zur App
         "magnify": False,  # Beta: Icons wachsen wie am Mac, wenn die Maus darüber fährt
         "pinned": [
             {"name": "Explorer", "target": "explorer.exe"},
@@ -107,6 +146,9 @@ DEFAULTS: dict[str, Any] = {
         "voice_seconds": 12,
         "live_actions": True,
         "situation_actions": True,
+        "quick_answers": True,  # Rechner, Umrechnen und „timer 10“ direkt in der Suche
+        "file_search": True,  # Dateien nach Namen in Desktop, Dokumente, Downloads, Bilder
+        "web_search": "duckduckgo",  # Suchmaschine für „w …“; core.quick_answers.SEARCH_ENGINES
         "width": 640,
         "position": "upper",
         "screen": "cursor",
@@ -179,8 +221,7 @@ MONITOR_DEFAULTS: dict[str, Any] = {
     "center": "none",  # title oder none; die Uhr hat ihren eigenen Platz (clock_place)
     "clock_place": "top_right",
     "dock_tools": "off",  # Beta: off, hover, always
-    "dock_stack_order": "clock_below",
-    "dev_claude_button": True,  # nur im Dev-Build: Claude-Knopf ganz links statt Claude als Task  # clock_below oder tools_below: wer von Uhr und Symbolleiste näher an der Taskbar sitzt
+    "dock_stack_order": "clock_below",  # clock_below oder tools_below: wer von Uhr und Symbolleiste näher an der Taskbar sitzt
     "dock_tools_items": ["start", "search", "nova", "trash", "desktop"],  # top_right, top_center, dock_left, dock_center, dock_right, none
     "show_user": True,
     "show_workspaces": True,
@@ -270,33 +311,79 @@ def _merge(defaults: dict, loaded: dict) -> dict:
     return merged
 
 
+def _is_immutable_same(old: Any, new: Any) -> bool:
+    """Prüft auf exakte Typ- und Wertgleichheit für unveränderliche Skalare."""
+    return isinstance(new, (str, int, float, bool, type(None))) and type(old) is type(new) and old == new
+
+
 class ConfigManager(QObject):
     changed = Signal(str)
 
-    def __init__(self, path: Path = SETTINGS_PATH):
+    def __init__(self, path: Path = SETTINGS_PATH, debounce_ms: int = 0):
         super().__init__()
         self.path = path
+        self._debounce_ms = max(0, int(debounce_ms))
+        self._dirty = False
+        self._deferred_retries = 0
+        self._save_timer: QTimer | None = None
+        # Konnte die vorhandene settings.json beim Start nicht gelesen werden (OneDrive-Sperre, nur in der Cloud,
+        # Virenscanner), stehen nur Standardwerte im Speicher. Die dürfen die echte Datei nie überschreiben.
+        self._load_failed = False
+        self._load_failed_logged = False
+        self._locked_backup_done = False
+        if self._debounce_ms > 0:
+            self._ensure_timer()
         self.data = self._load()
 
+    def _ensure_timer(self) -> QTimer | None:
+        if self._debounce_ms <= 0 or QCoreApplication.instance() is None:
+            return None
+        if self._save_timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._on_save_timer)
+            self._save_timer = timer
+        self._save_timer.setInterval(self._debounce_ms)
+        return self._save_timer
+
     def _load(self) -> dict:
-        try:
-            loaded = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(loaded, dict):
-                raise ValueError("settings.json ist kein Objekt")
-        except FileNotFoundError:
-            loaded = {}
-        except (ValueError, OSError) as exc:
-            # Kaputte Datei nicht überschreiben, sondern zur Fehlersuche aufheben.
-            log.warning("settings.json unlesbar (%s) - nutze Standardwerte", exc)
+        loaded: dict[str, Any] = {}
+        for attempt in range(len(LOAD_BACKOFF_S) + 1):
             try:
-                self.path.replace(self.path.with_suffix(".broken.json"))
+                parsed = json.loads(self.path.read_text(encoding="utf-8"))
+                if not isinstance(parsed, dict):
+                    raise ValueError("settings.json ist kein Objekt")
+                loaded = parsed
+                break
+            except FileNotFoundError:
+                loaded = {}
+                break
+            except ValueError as exc:
+                # Kaputte Datei nicht überschreiben, sondern zur Fehlersuche aufheben.
+                log.warning("settings.json unlesbar (%s) - nutze Standardwerte", exc)
+                try:
+                    self.path.replace(self.path.with_suffix(".broken.json"))
+                except OSError:
+                    pass
+                # Nur bei kaputtem JSON aufs neueste Backup zurückgreifen - nie bei gesperrter Datei (OSError, unten),
+                # sonst überschriebe ein altes Backup die echten Einstellungen.
+                loaded = self._newest_backup()
+                break
+            except OSError as exc:
+                if attempt < len(LOAD_BACKOFF_S):
+                    time.sleep(LOAD_BACKOFF_S[attempt])
+                    continue
+                log.warning("settings.json gesperrt/unlesbar (%s) - nutze Standardwerte, Speichern bleibt gesperrt", exc)
+                self._load_failed = True
+                loaded = {}
+        if not self._load_failed:
+            # Reste einer früheren gesperrten Sitzung: Die echte Datei ist wieder lesbar und gilt.
+            try:
+                self.session_path.unlink()
             except OSError:
                 pass
-            loaded = {}
         data = _merge(DEFAULTS, loaded)
         migrate_themes(data)
-        if loaded and "settings_v2_since_4" not in loaded:  # ab 4.0 Standard, auch wenn früher „aus“ gespeichert war
-            data["settings_v2"] = True
         if data["theme"] not in THEMES and not str(data["theme"]).startswith(CUSTOM_THEME_PREFIX):
             data["theme"] = DEFAULTS["theme"]
         if data["mode"] not in ("dark", "light"):
@@ -307,11 +394,159 @@ class ConfigManager(QObject):
             migrate_clock(profile)
         return data
 
-    def save(self) -> None:
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(self.data, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+    @property
+    def session_path(self) -> Path:
+        return session_path_for(self.path)
+
+    def _write_blocked(self) -> bool:
+        """True, solange die echte settings.json nicht geladen werden konnte.
+
+        Ist sie inzwischen lesbar, wird sie gesichert und das Schreiben bleibt trotzdem für diese Sitzung gesperrt:
+        Im Speicher stehen nur Standardwerte, die echten Einstellungen lädt der nächste Start.
+        Fehlt die Datei inzwischen ganz, gibt es nichts zu schützen.
+        Solange gesperrt ist, landet der Stand in settings.session.json (liest auch der Taskleisten-Wächter)."""
+        if not self._load_failed:
+            return False
+        try:
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            self._load_failed = False
+            return False
+        except OSError:
+            raw = None
+        if raw is not None and not self._locked_backup_done:
+            self._locked_backup_done = True
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup = self.path.with_name(f"{self.path.stem}.locked-{stamp}.json")
+            try:
+                backup.write_bytes(raw)
+            except OSError:
+                pass
+        if not self._load_failed_logged:
+            self._load_failed_logged = True
+            log.warning("settings.json wurde beim Start nicht geladen - Änderungen dieser Sitzung gehen nur nach %s, "
+                        "damit die echten Einstellungen erhalten bleiben. Ein Neustart von PopWin lädt sie wieder.",
+                        self.session_path.name)
+        return True
+
+    def _write_atomic(self, blocking: bool = True) -> bool:
+        """Schreibt settings.json atomar. `blocking=False` macht genau einen Versuch ohne Warten,
+        damit der GUI-Thread nie hängt; wiederholt wird dann über den Speicher-Timer."""
+        target = self.session_path if self._write_blocked() else self.path
+        backoff = SAVE_BACKOFF_S if blocking else ()
+        tmp: str | None = None
+        replaced = False
+        last_exc: OSError | None = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(self.data, indent=2, ensure_ascii=False)
+            for attempt in range(len(backoff) + 1):
+                created_tmp: str | None = None
+                try:
+                    fd, created_tmp = tempfile.mkstemp(
+                        dir=self.path.parent,
+                        prefix=".settings.",
+                        suffix=".tmp",
+                    )
+                    try:
+                        fh = os.fdopen(fd, "w", encoding="utf-8")
+                    except OSError:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                        raise
+                    with fh:
+                        fh.write(payload)
+                        fh.flush()
+                        try:
+                            os.fsync(fh.fileno())
+                        except OSError:
+                            pass
+                    tmp = created_tmp
+                    break
+                except OSError as exc:
+                    last_exc = exc
+                    if created_tmp:
+                        try:
+                            os.unlink(created_tmp)
+                        except OSError:
+                            pass
+                    if attempt < len(backoff):
+                        time.sleep(backoff[attempt])
+                    else:
+                        log.warning("settings.json konnte nicht gespeichert werden (%s)", last_exc)
+                        return False
+
+            for attempt in range(len(backoff) + 1):
+                try:
+                    os.replace(tmp, target)
+                    replaced = True
+                    self._dirty = False
+                    self._deferred_retries = 0
+                    return True
+                except (PermissionError, OSError) as exc:
+                    last_exc = exc
+                    if attempt < len(backoff):
+                        time.sleep(backoff[attempt])
+            log.warning("settings.json konnte nicht gespeichert werden (%s)", last_exc)
+            return False
+        except OSError as exc:
+            log.warning("settings.json konnte nicht gespeichert werden (%s)", exc)
+            return False
+        finally:
+            if not replaced and tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def enable_debounce(self, debounce_ms: int = DEFAULT_DEBOUNCE_MS) -> None:
+        self._debounce_ms = max(0, int(debounce_ms))
+        self._ensure_timer()
+
+    def save(self, immediate: bool = True) -> bool:
+        self._dirty = True
+        timer = None if immediate or self._debounce_ms <= 0 else self._ensure_timer()
+        if timer is None:
+            if self._save_timer is not None and self._save_timer.isActive():
+                self._save_timer.stop()
+            return self._write_atomic()
+        timer.start(self._debounce_ms)
+        return True
+
+    def _request_save(self) -> None:
+        self.save(immediate=self._debounce_ms <= 0)
+
+    def _on_save_timer(self) -> None:
+        if not self._dirty:
+            return
+        if self._write_atomic(blocking=False):
+            return
+        if self._save_timer is None:
+            return
+        # Wachsender Abstand (1 s, 2 s, 4 s ... höchstens 30 s), aber nie aufgeben, solange etwas offen ist.
+        step = min(self._deferred_retries, MAX_DEFERRED_RETRIES)
+        self._deferred_retries += 1
+        self._save_timer.start(min(RETRY_SAVE_DELAY_MS * (2 ** step), RETRY_SAVE_MAX_DELAY_MS))
+
+    def flush(self) -> bool:
+        if self._save_timer is not None and self._save_timer.isActive():
+            self._save_timer.stop()
+        if not self._dirty:
+            return True
+        return self._write_atomic()
+    def _newest_backup(self) -> dict:
+        """Ist settings.json kaputt, geht es mit dem neuesten lesbaren Backup weiter statt mit Standardwerten."""
+        for file in list_backups(self.path.parent / "backups"):
+            try:
+                loaded = json.loads(file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(loaded, dict):
+                log.warning("Einstellungen aus dem Backup %s wiederhergestellt", file.name)
+                return loaded
+        return {}
 
     @staticmethod
     def default_of(dotted: str) -> Any:
@@ -334,8 +569,11 @@ class ConfigManager(QObject):
         node = self.data
         for part in parts[:-1]:
             node = node.setdefault(part, {})
-        node[parts[-1]] = value
-        self.save()
+        leaf = parts[-1]
+        unchanged = leaf in node and _is_immutable_same(node[leaf], value)
+        node[leaf] = value
+        if not unchanged:
+            self._request_save()
         if notify:
             self.changed.emit(dotted)
 
@@ -354,7 +592,7 @@ class ConfigManager(QObject):
 
     def set_bar_screens(self, kind: str, mode: str, screens: list[str]) -> None:
         self.data["bar_screens"][kind] = {"mode": mode, "screens": screens}
-        self.save()
+        self._request_save()
         self.changed.emit("monitors")
 
     @property
@@ -372,18 +610,20 @@ class ConfigManager(QObject):
 
     def set_monitor(self, key: str | None, field: str, value: Any) -> None:
         if self.synced or key is None:
-            self.data["monitor_shared"][field] = value
+            target = self.data["monitor_shared"]
         else:
             # Ein neuer Monitor startet als Kopie des gemeinsamen Profils.
-            self.data["monitors"].setdefault(key, self.shared_profile())[field] = value
-        self.save()
+            target = self.data["monitors"].setdefault(key, self.shared_profile())
+        if not (field in target and _is_immutable_same(target[field], value)):
+            target[field] = value
+            self._request_save()
         self.changed.emit("monitors" if field in STRUCTURAL_FIELDS else "profile")
 
     def set_monitor_mode(self, mode: str) -> None:
         """Einzelprofile bleiben beim Wechsel erhalten und gelten beim Zurückwechseln wieder."""
         if mode in ("sync", "separate") and mode != self.data["monitor_mode"]:
             self.data["monitor_mode"] = mode
-            self.save()
+            self._request_save()
             self.changed.emit("monitors")
 
     def copy_profile_to_all(self, key: str, keys: list[str]) -> None:
@@ -391,7 +631,7 @@ class ConfigManager(QObject):
         self.data["monitor_shared"] = dict(profile)
         for other in keys:
             self.data["monitors"][other] = dict(profile)
-        self.save()
+        self._request_save()
         self.changed.emit("monitors")
 
     def models(self, kind: str) -> list[str]:
@@ -524,11 +764,27 @@ def list_presets(folder: Path = PRESETS_DIR) -> list[str]:
 
 
 def _write_json(path: Path, document: dict) -> None:
+    """Atomar schreiben; eine kurz gesperrte Zieldatei (OneDrive, Virenscanner) bekommt ein paar Wiederholungen."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(document, fh, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(document, fh, indent=2, ensure_ascii=False)
+        for attempt in range(len(SAVE_BACKOFF_S) + 1):
+            try:
+                os.replace(tmp, path)
+                tmp = ""
+                return
+            except OSError:
+                if attempt >= len(SAVE_BACKOFF_S):
+                    raise
+                time.sleep(SAVE_BACKOFF_S[attempt])
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def export_settings(config: "ConfigManager", path: Path, name: str = "") -> None:
@@ -549,6 +805,56 @@ def import_settings(config: "ConfigManager", path: Path) -> str:
     config.changed.emit("monitors")
     config.changed.emit("profile")
     return name
+
+
+BACKUP_DIR = DATA_DIR / "backups"
+BACKUPS_KEPT = 5
+
+
+def list_backups(folder: Path = BACKUP_DIR) -> list[Path]:
+    """Neueste zuerst. Der Dateiname trägt Datum und Uhrzeit, deshalb genügt die Sortierung nach Namen."""
+    return sorted(folder.glob("settings-*.json"), key=lambda file: file.name, reverse=True) if folder.is_dir() else []
+
+
+def backup_settings(path: Path = SETTINGS_PATH, folder: Path | None = None, stamp: str = "", keep: int = BACKUPS_KEPT) -> Path | None:
+    """Hebt eine Kopie der Einstellungen auf und behält die letzten `keep`. Unverändertes und Unlesbares wird nicht
+    noch einmal gesichert: Sonst verdrängten fünf gleiche oder eine kaputte Datei die brauchbaren Stände."""
+    folder = folder or path.parent / "backups"
+    try:
+        text = path.read_text(encoding="utf-8")
+        if not isinstance(json.loads(text), dict):
+            return None
+    except (OSError, ValueError):
+        return None
+    existing = list_backups(folder)
+    try:
+        if existing and existing[0].read_text(encoding="utf-8") == text:
+            return None
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"settings-{stamp or time.strftime('%Y%m%d-%H%M%S')}.json"
+        target.write_text(text, encoding="utf-8")
+        for old in list_backups(folder)[keep:]:
+            old.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Einstellungs-Backup nicht möglich: %s", exc)
+        return None
+    return target
+
+
+def restore_backup(config: "ConfigManager", file: Path) -> None:
+    """Holt einen gesicherten Stand zurück. Der gemerkte Zustand der Windows-Taskleiste bleibt der von jetzt:
+    Mit dem alten Wert käme sie beim Beenden nicht richtig zurück."""
+    loaded = json.loads(Path(file).read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError("Das Backup enthält keine Einstellungen.")
+    taskbar_state = config.data.get("shell", {}).get("saved_taskbar_state")
+    _write_json(config.path, loaded)
+    config._load_failed = False  # die Datei war eben schreibbar; ab jetzt gilt sie wieder (auch statt settings.session.json)
+    config.data = config._load()
+    config.data["shell"]["saved_taskbar_state"] = taskbar_state
+    config.save()
+    config.changed.emit("monitors")
+    config.changed.emit("profile")
 
 
 def delete_preset(name: str, folder: Path = PRESETS_DIR) -> None:

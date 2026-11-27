@@ -43,6 +43,7 @@ from editor.widget import decode, line_ending  # noqa: E402
 from ui.app_shell import run_app  # noqa: E402
 from ui.base import G, IconButton, glyph_icon, icon_for_target, themed_menu  # noqa: E402
 from ui.context_menu import ContextMenu  # noqa: E402
+from ui.drag_switch import DragHover  # noqa: E402
 from ui.window_frame import NativeWindow  # noqa: E402
 
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico"}
@@ -1367,6 +1368,28 @@ class TearTabBar(QTabBar):
     def __init__(self):
         super().__init__()
         self._holding = False
+        # Hinhalten beim Ziehen: Bleibt eine gezogene Datei über einem Tab stehen, wechselt der Explorer dorthin.
+        self.setAcceptDrops(True)
+        self._drag_hover = DragHover(self)
+        self._drag_hover.held.connect(lambda index: index < self.count() and self.setCurrentIndex(index))
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.accept()
+
+    def dragMoveEvent(self, event) -> None:
+        index = self.tabAt(event.position().toPoint())
+        self._drag_hover.over(index if index >= 0 and index != self.currentIndex() else None)
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.ignore()  # ablegen lässt sich auf einem Tab nichts, nur wechseln
+
+    def dragLeaveEvent(self, event) -> None:
+        self._drag_hover.leave()
+
+    def dropEvent(self, event) -> None:
+        self._drag_hover.leave()
+        event.ignore()
 
     def mousePressEvent(self, event) -> None:
         self._holding = event.button() == Qt.MouseButton.LeftButton and self.tabAt(event.position().toPoint()) >= 0

@@ -346,7 +346,7 @@ class ArtifactEditor(QWidget):
         self.check = QComboBox()
         self.check.addItem("Keine Prüfung", "")
         for value, label in nova_artifacts.CHECKS.items():
-            if value != "ovh_domains" or self.nova.toolbox.has_ovh():
+            if self.nova.toolbox.has_check(value):
                 self.check.addItem(label, value)
         for item in self.nova.artifacts.all():
             if item["kind"] == "werkzeug":

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +17,7 @@ import psutil
 from PySide6.QtCore import QThread, Signal
 
 from core import i18n, win_api
+from core.schedule import rotation_pick
 from core.paths import DATA_DIR, ROOT, app_command
 
 log = logging.getLogger(__name__)
@@ -34,11 +36,34 @@ FREE_SOURCES = {"Pexels": "https://www.pexels.com/search/videos/abstract%20loop/
 FOLDER = DATA_DIR / "wallpapers"
 PRESET_FOLDER = ROOT / "assets" / "wallpapers"
 PRESETS = {"galaxie": "Galaxie", "linien": "Linien", "wellen": "Wellen", "waben": "Waben", "kristall": "Kristall", "sterne": "Sterne",
-           "scherben": "Scherben", "gipfel": "Gipfel", "dash": "Dash", "saegen": "Sägen", "null": "Null"}
+           "scherben": "Scherben", "gipfel": "Gipfel", "dash": "Dash", "saegen": "Sägen", "null": "Null",
+           "polarlicht": "Polarlicht", "raster": "Raster", "glut": "Glut"}
 PRESET_PREFIX = "preset:"
 AUTO, ENGINE, OWN = "auto", "engine", "popwin"
 ENGINE_START = f"steam://rungameid/{ENGINE_STEAM_ID}"
 MAX_FAILURES = 3
+GIF_CACHE_BUDGET = 96 * 1024 ** 2  # so viel RAM dürfen die fertig skalierten Bilder eines GIFs höchstens belegen
+PAUSE_COVERED, PAUSE_BATTERY = "c", "b"  # Kennbuchstaben, die der Hintergrund-Prozess als viertes Argument bekommt
+
+
+def gif_fits_cache(frames: int, width: int, height: int, budget: int = GIF_CACHE_BUDGET) -> bool:
+    """Passen alle Bilder eines GIFs in Zielgröße in den Speicher? Ein GIF mit 100 Bildern belegt auf 1440p rund 1,4 GB;
+    solche spielt PopWin Bild für Bild ab, statt alle vorzuhalten. Unbekannte Bildzahl (0) gilt als zu groß."""
+    return frames > 0 and frames * width * height * 4 <= budget
+
+
+def pause_flags(settings: dict) -> str:
+    return (PAUSE_COVERED if settings.get("pause_covered", True) else "") + (PAUSE_BATTERY if settings.get("pause_on_battery", True) else "")
+
+
+def should_play(fullscreen: bool, covered: list[bool], on_battery: bool, flags: str) -> bool:
+    """Läuft der Hintergrund gerade? Nicht hinter einem Vollbild, nicht wenn jeder bespielte Bildschirm von einem
+    maximierten Fenster verdeckt ist, und auf Wunsch nicht im Akkubetrieb."""
+    if fullscreen:
+        return False
+    if PAUSE_COVERED in flags and covered and all(covered):
+        return False
+    return not (PAUSE_BATTERY in flags and on_battery)
 
 
 def steam_libraries() -> list[Path]:
@@ -158,16 +183,29 @@ class WallpaperPlayer:
         self.running_with: tuple = ()
         self.engine_started = False
         self.failures = 0
+        self.rotation_start = time.monotonic()
+        self.rotation_from = ""  # die Wahl, bei der der Wechsel begonnen hat
 
     def wanted(self, engine: str) -> tuple:
         """Ohne eigene Wahl passiert nichts: PopWin setzt von sich aus nie einen Hintergrund."""
         settings = self.ctx.config.get("wallpaper")
-        file = media_path(settings["file"])
+        file = media_path(self.current_choice(settings))
         if settings["source"] == ENGINE or not settings["enabled"] or not file or not os.path.exists(file):
             return ()
         if engine in (RUNNING, "") and settings["source"] == AUTO:  # "": die erste Prüfung steht noch aus, nicht vorschnell drüberlegen
             return ()
-        return file, settings["screens"]
+        return file, settings["screens"], pause_flags(settings)
+
+    def current_choice(self, settings: dict) -> str:
+        """Mit eingeschaltetem Wechsel der Hintergrund, der gerade dran ist; sonst der gewählte."""
+        choice, every = settings["file"], int(settings.get("rotate_minutes") or 0)
+        if not choice or every <= 0:
+            return choice
+        if choice != self.rotation_from:  # neu gewählt: Der Wechsel beginnt dort von vorn
+            self.rotation_from, self.rotation_start = choice, time.monotonic()
+        choices = [PRESET_PREFIX + key for key in PRESETS] + [str(path) for path in library()]
+        elapsed = (time.monotonic() - self.rotation_start) / 60
+        return rotation_pick(choices, choice, elapsed, every, bool(settings.get("rotate_shuffle")), seed=os.getpid())
 
     def _follow_source(self, engine: str) -> None:
         source = self.ctx.config.get("wallpaper.source")
@@ -201,7 +239,7 @@ class WallpaperPlayer:
             self.running_with = wanted
             return
         if wanted:
-            self.process = subprocess.Popen(app_command("wallpaper", wanted[0], wanted[1], str(os.getpid())), cwd=ROOT,
+            self.process = subprocess.Popen(app_command("wallpaper", wanted[0], wanted[1], str(os.getpid()), wanted[2]), cwd=ROOT,
                                             creationflags=subprocess.CREATE_NO_WINDOW)
             self.running_with = wanted
 

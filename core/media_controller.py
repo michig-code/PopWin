@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from datetime import datetime, timezone
 
 from PySide6.QtCore import QThread, Signal
 
@@ -10,6 +12,28 @@ log = logging.getLogger(__name__)
 _PLAYING = 4  # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
 READ_TIMEOUT = 4.0
 RECONNECT_AFTER = 10  # Abfragen ohne Player
+SEEK_JUMP = 3.0  # Sekunden: springt die Stelle weiter, hat jemand im Song gespult
+
+
+def media_changed(old, new, elapsed: float) -> bool:
+    """Neu senden nur, wenn sich wirklich etwas ändert. Dass die Stelle im Song weiterläuft, rechnet die
+    Anzeige selbst; nur ein Sprung (Spulen) zählt als Änderung."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return old != new
+    if {k: v for k, v in old.items() if k != "position"} != {k: v for k, v in new.items() if k != "position"}:
+        return True
+    expected = old.get("position", 0.0) + (elapsed if old.get("playing") else 0.0)
+    return abs(new.get("position", 0.0) - expected) > SEEK_JUMP
+
+
+def song_position(position: float, duration: float, playing: bool, updated, now) -> float:
+    """Windows liefert die Stelle vom Zeitpunkt der letzten Meldung des Players; bis jetzt ist sie weitergelaufen."""
+    if playing and updated is not None and now is not None:
+        try:
+            position += max(0.0, (now - updated).total_seconds())
+        except TypeError:  # eine Zeit ohne Zeitzone
+            pass
+    return max(0.0, min(position, duration)) if duration > 0 else 0.0
 
 
 class MediaController(QThread):
@@ -23,6 +47,7 @@ class MediaController(QThread):
         self._last_key = None
         self._thumbnail = b""
         self._last_state = object()
+        self._sent_at = 0.0
         self._idle = 0
 
     def run(self) -> None:
@@ -49,8 +74,10 @@ class MediaController(QThread):
         await self._connect()
         while not self._stop:
             state = await self._next_state()
-            if state != self._last_state:
+            now = time.monotonic()
+            if media_changed(self._last_state, state, now - self._sent_at):
                 self._last_state = state
+                self._sent_at = now
                 self.updated.emit(state)
             await asyncio.sleep(1)
 
@@ -77,6 +104,8 @@ class MediaController(QThread):
             return None
         props = await session.try_get_media_properties_async()
         info = session.get_playback_info()
+        playing = info.playback_status == _PLAYING
+        position, duration = self._timeline(session, playing)
         key = (props.title, props.artist)
         if key != self._last_key:
             self._last_key = key
@@ -85,9 +114,23 @@ class MediaController(QThread):
             "title": props.title or "",
             "artist": props.artist or "",
             "app": session.source_app_user_model_id or "",
-            "playing": info.playback_status == _PLAYING,
+            "playing": playing,
             "thumbnail": self._thumbnail,
+            "position": position,
+            "duration": duration,
         }
+
+    @staticmethod
+    def _timeline(session, playing: bool) -> tuple[float, float]:
+        """Stelle und Länge in Sekunden; Player ohne Zeitleiste (manche Browser) liefern 0, 0."""
+        try:
+            timeline = session.get_timeline_properties()
+            duration = (timeline.end_time - timeline.start_time).total_seconds()
+            return song_position(timeline.position.total_seconds(), duration, playing,
+                                 timeline.last_updated_time, datetime.now(timezone.utc)), duration
+        except Exception as exc:
+            log.debug("Zeitleiste nicht lesbar: %s", exc)
+            return 0.0, 0.0
 
     @staticmethod
     async def _read_thumbnail(reference) -> bytes:

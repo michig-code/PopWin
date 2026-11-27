@@ -39,4 +39,4 @@ class ClockWidget(DeskletWindow):
     def _tick(self) -> None:
         now = QDateTime.currentDateTime()
         self.time.setText(now.toString("HH:mm:ss" if self.option("seconds") else "HH:mm"))
-        self.date.setText(QLocale.system().toString(now, "dddd, dd.MM.yyyy"))
+        self.date.setText(QLocale().toString(now, "dddd, dd.MM.yyyy"))  # QLocale(): die eingestellte App-Sprache
