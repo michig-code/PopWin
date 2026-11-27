@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-VERSION = "4.5.1"  # bei jeder neuen Ausgabe erhöhen, daran erkennt das Setup ein Update
+VERSION = "4.5.2"  # bei jeder neuen Ausgabe erhöhen, daran erkennt das Setup ein Update
 APP_NAME = "PopWin"
 EXE_NAME = "PopWin.exe"
 UNINSTALLER = "Deinstallieren.exe"
@@ -442,21 +442,23 @@ def stop_running(folder: Path) -> bool:
     return was_running
 
 
-def end_leftovers(folder: Path) -> None:
-    """Der Wächter ist selbst PopWin.exe und hielte die Dateien fest. Er bekommt kurz Zeit, die Taskleiste zurückzuholen."""
+def end_leftovers(folder: Path) -> list[int]:
+    """Der Wächter ist selbst PopWin.exe und hielte die Dateien fest. Er bekommt kurz Zeit, die Taskleiste zurückzuholen.
+
+    Liefert, was sich trotzdem nicht beenden lässt. Ein PopWin, das beim Starten hängen blieb und schon im Beenden
+    feststeckt, lehnt Windows mit „Zugriff verweigert“ ab. Das ist kein Grund aufzugeben: Seine Dateien wandern
+    zur Seite (clear_old), und erst wenn auch das scheitert, sagt das Setup, welches PopWin im Weg ist."""
     import psutil
     left = _matching_processes(folder, ["exe"])
     if not left:
-        return
+        return []
     alive = wait_gone(left, WATCHDOG_WAIT)
     for process in alive:
         try:
             process.kill()
         except psutil.Error:
             pass
-    stuck = wait_gone(alive, 2)
-    if stuck:
-        raise StillRunning([process.pid for process in stuck])
+    return [process.pid for process in wait_gone(alive, 2)]
 
 
 def _writable(function, path, _error) -> None:
@@ -771,11 +773,15 @@ class InstallThread(QThread):
         self.folder = folder
         self.options = options
         self.was_running = False
+        self.stuck: list[int] = []  # PopWins, die sich nicht beenden ließen; nur für eine verständliche Meldung
 
     def run(self) -> None:
         try:
             self.install()
         except PermissionError:
+            if self.stuck:  # nicht die Rechte, sondern ein hängendes PopWin hält die Dateien fest
+                self.failed.emit(str(StillRunning(self.stuck)), not is_admin())
+                return
             self.failed.emit(f"PopWin darf nicht in {self.folder} schreiben.", not is_admin())
             return
         except zipfile.BadZipFile:
@@ -785,6 +791,9 @@ class InstallThread(QThread):
             self.failed.emit(str(exc), not is_admin())  # mit Adminrechten lässt es sich beenden
             return
         except OSError as exc:
+            if self.stuck:
+                self.failed.emit(str(StillRunning(self.stuck)), not is_admin())
+                return
             self.failed.emit(exc.strerror or str(exc), False)
             return
         except Exception as exc:
@@ -813,12 +822,12 @@ class InstallThread(QThread):
                     if not same_target:
                         self.status.emit("Vorherige Installation wird beendet...")
                         self.was_running = stop_running(previous) or self.was_running
-                        end_leftovers(previous)
+                        self.stuck += end_leftovers(previous)
 
             if self.folder.exists():
                 self.status.emit("Laufende Dateien werden vorbereitet...")
                 self.was_running = stop_running(self.folder) or self.was_running
-                end_leftovers(self.folder)
+                self.stuck += end_leftovers(self.folder)
                 sweep_aside(self.folder)
                 for name in ("_internal", EXE_NAME):  # alte Dateien dürfen nicht neben den neuen liegen bleiben
                     clear_old(self.folder / name)

@@ -2362,22 +2362,44 @@ class SetupStopsPopWin(unittest.TestCase):
         self.assertEqual(alive, [stuck])
         self.assertEqual(self.setup.wait_gone([], 5), [])
 
-    def test_a_popwin_that_will_not_end_gets_a_clear_message(self):
+    def test_a_hung_popwin_is_reported_not_fatal(self):
         stuck = unittest.mock.Mock(pid=280)
-        stuck.kill.side_effect = psutil.AccessDenied(280)
+        stuck.kill.side_effect = psutil.AccessDenied(280)  # hängt schon im Beenden (Test-PC)
         with unittest.mock.patch.object(self.setup, "_matching_processes", return_value=[stuck]), \
                 unittest.mock.patch.object(self.setup, "wait_gone", side_effect=lambda procs, timeout: list(procs)):
-            with self.assertRaises(self.setup.StillRunning) as caught:
-                self.setup.end_leftovers(Path("C:/PopWin"))
-        self.assertIn("280", str(caught.exception))
-        self.assertIn("schließen", str(caught.exception))
+            self.assertEqual(self.setup.end_leftovers(Path("C:/PopWin")), [280])
 
     def test_ended_popwins_pass(self):
         process = unittest.mock.Mock(pid=5)
         with unittest.mock.patch.object(self.setup, "_matching_processes", return_value=[process]), \
                 unittest.mock.patch.object(self.setup, "wait_gone", return_value=[]):
-            self.setup.end_leftovers(Path("C:/PopWin"))
+            self.assertEqual(self.setup.end_leftovers(Path("C:/PopWin")), [])
         process.kill.assert_not_called()
+        with unittest.mock.patch.object(self.setup, "_matching_processes", return_value=[]):
+            self.assertEqual(self.setup.end_leftovers(Path("C:/PopWin")), [])
+
+    def _run_install(self, error, stuck):
+        worker = self.setup.InstallThread(Path(tempfile.mkdtemp()), {"test": True})
+        worker.stuck = list(stuck)
+        failed, done = [], []
+        worker.failed.connect(lambda message, admin: failed.append(message))
+        worker.done.connect(lambda: done.append(True))
+        with unittest.mock.patch.object(worker, "install", side_effect=error):
+            worker.run()  # direkt, ohne Thread
+        return failed, done
+
+    def test_installation_goes_on_around_a_hung_popwin(self):
+        failed, done = self._run_install(None, [280, 3608])
+        self.assertEqual((failed, done), ([], [True]))  # die Dateien liegen zur Seite, nichts hält mehr auf
+
+    def test_only_when_files_stay_locked_it_names_the_popwin(self):
+        for error in (PermissionError("gesperrt"), OSError(32, "in Benutzung")):
+            failed, done = self._run_install(error, [280, 3608])
+            self.assertEqual(done, [])
+            self.assertIn("280, 3608", failed[0])
+            self.assertIn("Task-Manager", failed[0])
+        failed, _done = self._run_install(PermissionError("x"), [])
+        self.assertIn("darf nicht", failed[0])  # ohne hängendes PopWin bleibt es die Rechte-Meldung
 
     def test_stubborn_process_in_stop_running_is_killed(self):
         process = unittest.mock.Mock(pid=7, info={"cmdline": ["PopWin.exe"]})

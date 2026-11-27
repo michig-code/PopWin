@@ -1,5 +1,12 @@
 ﻿# Änderungen
 
+## 4.5.2
+
+- Setup beendet nun laufende PopWin-Instanzen automatisch.
+- Bei Blockaden werden alte Dateien zur Seite geschoben.
+- Andernfalls folgt ein klarer Hinweis auf das blockierende PopWin.
+- Bietet Option zur Installation als Administrator an.
+
 ## 4.5.1
 
 - **Setup repariert:** Die Installation brach ab, wenn noch ein PopWin lief, das sich nicht beenden ließ (zum Beispiel mit Administratorrechten), und zeigte nur „pid 280“. Jetzt beendet das Setup laufende PopWins zuverlässig. Klappt das nicht, sagt es klar, was zu tun ist, und bietet „Als Administrator installieren“ an.
